@@ -22,6 +22,7 @@ import com.refundops.RefundModels.RefundResult;
 
 @Service
 public class RefundService {
+    private static final BigDecimal APPROVAL_THRESHOLD = new BigDecimal("10000");
     private final Map<String, Order> orders = new LinkedHashMap<>();
     private final List<Refund> refunds = new ArrayList<>();
     private final List<Payment> payments = new ArrayList<>();
@@ -69,21 +70,135 @@ public class RefundService {
         }
         Instant now = Instant.now();
         String refundId = "RF-" + (refundSequence + 1);
-        String paymentId = "PAY-" + (paymentSequence + 1);
-        Refund refund = new Refund(refundId, order, requester, request.reason.name(), notes, now, paymentId);
-        Payment payment = provider.send(paymentId, refund, now);
-        RefundResult result = new RefundResult(refund, payment, false);
-        // The mock provider and every state transition share this monitor, including reset and snapshots.
         refundSequence++;
-        paymentSequence++;
-        orders.put(order.id, order.refundSent());
+        Refund refund;
+        Payment payment;
+        if (order.amount.compareTo(APPROVAL_THRESHOLD) > 0) {
+            refund = new Refund(refundId, order, requester, request.reason.name(), notes,
+                    "PENDING_APPROVAL", now, null, null, null, "");
+            payment = null;
+            orders.put(order.id, order.refundPending());
+            events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_PENDING_APPROVAL",
+                    "Refund awaiting approval", refundId + " · " + order.id + " · INR "
+                    + order.amount.toPlainString() + " · requested by " + requester.displayName,
+                    requester.displayName, refundId));
+        } else {
+            String paymentId = "PAY-" + (paymentSequence + 1);
+            refund = new Refund(refundId, order, requester, request.reason.name(), notes,
+                    "SENT_TO_PROVIDER", now, paymentId, null, null, "");
+            payment = provider.send(paymentId, refund, now);
+            paymentSequence++;
+            orders.put(order.id, order.refundSent());
+            payments.add(0, payment);
+            events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_SENT",
+                    "Refund sent to MockPay", refundId + " · " + order.id + " · INR "
+                    + order.amount.toPlainString() + " · automatic processing",
+                    requester.displayName, refundId));
+        }
+        RefundResult result = new RefundResult(refund, payment, false);
+        // Provider calls and every state transition share this monitor, including reset and snapshots.
         refunds.add(0, refund);
-        payments.add(0, payment);
-        events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_SENT",
-                "Refund sent to MockPay", refundId + " · " + order.id + " · INR "
-                + order.amount.toPlainString() + " · " + request.reason.name(), requester.displayName, refundId));
         submissions.put(key, new Submission(username, order.id, request.reason.name(), notes, result));
         return result;
+    }
+
+    public synchronized RefundResult approve(
+            String username, String refundId, ApprovalDecisionRequest request) {
+        DemoUsers.User approver = requireApprover(username);
+        int index = refundIndex(refundId);
+        Refund refund = refunds.get(index);
+        if (refund.requesterUsername.equals(approver.username)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "SELF_APPROVAL_FORBIDDEN",
+                    "Requesters cannot approve their own refund.");
+        }
+        if ("SENT_TO_PROVIDER".equals(refund.status)) {
+            Payment payment = payments.stream()
+                    .filter(candidate -> refund.id.equals(candidate.refundId))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("Approved refund is missing its payment."));
+            return new RefundResult(refund, payment, true);
+        }
+        requirePending(refund);
+        String notes = decisionNotes(request);
+        Instant now = Instant.now();
+        String paymentId = "PAY-" + (paymentSequence + 1);
+        Refund approved = refund.decide("SENT_TO_PROVIDER", paymentId, approver, now, notes);
+        Payment payment = provider.send(paymentId, approved, now);
+        paymentSequence++;
+        refunds.set(index, approved);
+        payments.add(0, payment);
+        updateSubmissionResult(approved, payment);
+        Order order = orders.get(refund.orderId);
+        orders.put(order.id, order.refundSent());
+        events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_APPROVED",
+                "Refund approved and sent to MockPay",
+                refund.id + " · " + refund.orderId + " · INR " + refund.amount.toPlainString()
+                        + " · requested by " + refund.requesterName,
+                approver.displayName, refund.id));
+        return new RefundResult(approved, payment, false);
+    }
+
+    public synchronized RefundResult reject(
+            String username, String refundId, ApprovalDecisionRequest request) {
+        DemoUsers.User approver = requireApprover(username);
+        int index = refundIndex(refundId);
+        Refund refund = refunds.get(index);
+        if (refund.requesterUsername.equals(approver.username)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "SELF_APPROVAL_FORBIDDEN",
+                    "Requesters cannot reject their own refund.");
+        }
+        if ("REJECTED".equals(refund.status) && approver.username.equals(refund.decidedByUsername)) {
+            return new RefundResult(refund, null, true);
+        }
+        requirePending(refund);
+        String notes = decisionNotes(request);
+        Instant now = Instant.now();
+        Refund rejected = refund.decide("REJECTED", null, approver, now, notes);
+        refunds.set(index, rejected);
+        updateSubmissionResult(rejected, null);
+        Order order = orders.get(refund.orderId);
+        orders.put(order.id, order.refundRejected());
+        events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_REJECTED",
+                "Refund rejected", refund.id + " · " + refund.orderId + " · INR "
+                + refund.amount.toPlainString() + " · requested by " + refund.requesterName,
+                approver.displayName, refund.id));
+        return new RefundResult(rejected, null, false);
+    }
+
+    private DemoUsers.User requireApprover(String username) {
+        DemoUsers.User user = DemoUsers.get(username);
+        if (!user.roles.contains("APPROVER")) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "APPROVER_REQUIRED",
+                    "Only an approver can decide high-value refunds.");
+        }
+        return user;
+    }
+
+    private int refundIndex(String refundId) {
+        for (int index = 0; index < refunds.size(); index++) {
+            if (refunds.get(index).id.equals(refundId)) {
+                return index;
+            }
+        }
+        throw new ApiException(HttpStatus.NOT_FOUND, "REFUND_NOT_FOUND", "Refund not found.");
+    }
+
+    private static void requirePending(Refund refund) {
+        if (!"PENDING_APPROVAL".equals(refund.status)) {
+            throw new ApiException(HttpStatus.CONFLICT, "DECISION_ALREADY_MADE",
+                    "This refund already has a final decision.");
+        }
+    }
+
+    private static String decisionNotes(ApprovalDecisionRequest request) {
+        return request.notes == null ? "" : request.notes;
+    }
+
+    private void updateSubmissionResult(Refund refund, Payment payment) {
+        submissions.values().stream()
+                .filter(submission -> submission.result.refund.id.equals(refund.id))
+                .findFirst()
+                .ifPresent(submission -> submission.result = new RefundResult(refund, payment, false));
     }
 
     public synchronized Dashboard reset() {
@@ -120,8 +235,8 @@ public class RefundService {
         seed("ORD-1053", "Arjun Talwalkar", "AT", "arjun.talwalkar", "FrameView 27-inch Monitor",
                 "Electronics", "22990", "2026-09-06T13:40:00Z", "Net Banking");
         events.add(new Event("EVT-" + (++eventSequence), Instant.parse("2026-09-07T08:00:00Z"),
-                "BASELINE_READY", "Legacy baseline ready",
-                "12 synthetic orders loaded. All valid refunds are sent immediately to MockPay.",
+                "CANDIDATE_READY", "Approval candidate ready",
+                "12 synthetic orders loaded. Refunds above INR 10,000 require independent approval.",
                 "System", null));
         return dashboard();
     }
@@ -137,7 +252,7 @@ public class RefundService {
         private final String orderId;
         private final String reason;
         private final String notes;
-        private final RefundResult result;
+        private RefundResult result;
 
         private Submission(String username, String orderId, String reason, String notes, RefundResult result) {
             this.username = username;

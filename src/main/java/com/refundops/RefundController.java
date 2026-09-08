@@ -12,6 +12,7 @@ import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -47,6 +48,20 @@ public class RefundController {
             Authentication authentication, @Valid @RequestBody RefundRequest request) {
         RefundModels.RefundResult result = service.create(authentication.getName(), request);
         return ResponseEntity.status(result.replayed ? HttpStatus.OK : HttpStatus.CREATED).body(result);
+    }
+
+    @PostMapping("/refunds/{refundId}/approve")
+    public RefundModels.RefundResult approve(
+            Authentication authentication, @PathVariable String refundId,
+            @Valid @RequestBody ApprovalDecisionRequest request) {
+        return service.approve(authentication.getName(), refundId, request);
+    }
+
+    @PostMapping("/refunds/{refundId}/reject")
+    public RefundModels.RefundResult reject(
+            Authentication authentication, @PathVariable String refundId,
+            @Valid @RequestBody ApprovalDecisionRequest request) {
+        return service.reject(authentication.getName(), refundId, request);
     }
 
     @PostMapping("/demo/reset")

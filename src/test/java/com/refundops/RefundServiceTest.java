@@ -52,7 +52,7 @@ class RefundServiceTest {
             for (int i = 0; i < 24; i++) {
                 futures.add(executor.submit(() -> {
                     start.await();
-                    return service.create("shweta", request(key));
+                    return service.create("shweta", request(key, "ORD-1046"));
                 }));
             }
             start.countDown();
@@ -85,7 +85,7 @@ class RefundServiceTest {
                 futures.add(executor.submit(() -> {
                     start.await();
                     try {
-                        service.create(username, request(UUID.randomUUID().toString()));
+                        service.create(username, request(UUID.randomUUID().toString(), "ORD-1046"));
                         return true;
                     } catch (ApiException error) {
                         assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
@@ -116,11 +116,11 @@ class RefundServiceTest {
     @Test
     void snapshotsCannotBeMutatedAndDoNotChangeAfterCreateOrReset() {
         Dashboard initial = service.dashboard();
-        service.create("shweta", request(UUID.randomUUID().toString()));
+        service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1046"));
         Dashboard sent = service.dashboard();
         assertThat(initial.refunds).isEmpty();
-        assertThat(initial.orders.get(0).status).isEqualTo("PAID");
-        assertThat(sent.orders.get(0).status).isEqualTo("REFUND_SENT");
+        assertThat(order(initial, "ORD-1046").status).isEqualTo("PAID");
+        assertThat(order(sent, "ORD-1046").status).isEqualTo("REFUND_SENT");
         assertThatThrownBy(() -> sent.orders.clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> sent.refunds.clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> sent.payments.clear()).isInstanceOf(UnsupportedOperationException.class);
@@ -129,22 +129,83 @@ class RefundServiceTest {
                 .isInstanceOf(UnsupportedOperationException.class);
         service.reset();
         assertThat(sent.refunds).hasSize(1);
-        assertThat(sent.orders.get(0).status).isEqualTo("REFUND_SENT");
+        assertThat(order(sent, "ORD-1046").status).isEqualTo("REFUND_SENT");
         assertThat(service.dashboard().refunds).isEmpty();
     }
 
     @Test
     void canonicalUuidCaseReplaysAndNullNotesMatchOmittedNotes() {
         String key = "aabbccdd-1122-3344-5566-778899aabbcc";
-        RefundRequest request = request(key);
+        RefundRequest request = request(key, "ORD-1046");
         request.notes = null;
         RefundResult original = service.create("dahnesh", request);
-        RefundRequest retry = request(key.toUpperCase(java.util.Locale.ROOT));
+        RefundRequest retry = request(key.toUpperCase(java.util.Locale.ROOT), "ORD-1046");
         retry.notes = "";
         RefundResult replay = service.create("dahnesh", retry);
         assertThat(replay.replayed).isTrue();
         assertThat(replay.refund).isSameAs(original.refund);
         assertThat(replay.payment).isSameAs(original.payment);
+    }
+
+    @Test
+    void highValueRequestWaitsForIndependentApprovalBeforeSendingPayment() {
+        String key = UUID.randomUUID().toString();
+        RefundResult pending = service.create("shweta", request(key, "ORD-1044"));
+        assertThat(pending.refund.status).isEqualTo("PENDING_APPROVAL");
+        assertThat(pending.payment).isNull();
+        assertThat(service.dashboard().approvalQueue).containsExactly(pending.refund);
+        assertThat(service.dashboard().payments).isEmpty();
+        verify(provider, times(0)).send(anyString(), any(), any());
+
+        RefundResult approved = service.approve("dahnesh", pending.refund.id, decision("Reviewed independently"));
+        assertThat(approved.refund.status).isEqualTo("SENT_TO_PROVIDER");
+        assertThat(approved.refund.decidedByUsername).isEqualTo("dahnesh");
+        assertThat(approved.payment.id).isEqualTo("PAY-3001");
+        assertThat(service.dashboard().approvalQueue).isEmpty();
+        verify(provider, times(1)).send(anyString(), any(), any());
+        RefundResult replay = service.create("shweta", request(key, "ORD-1044"));
+        assertThat(replay.replayed).isTrue();
+        assertThat(replay.refund.status).isEqualTo("SENT_TO_PROVIDER");
+        assertThat(replay.payment.id).isEqualTo("PAY-3001");
+    }
+
+    @Test
+    void requesterCannotDecideOwnHighValueRefund() {
+        RefundResult pending = service.create("dahnesh", request(UUID.randomUUID().toString(), "ORD-1044"));
+        assertThatThrownBy(() -> service.approve("dahnesh", pending.refund.id, decision("")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("SELF_APPROVAL_FORBIDDEN");
+        assertThatThrownBy(() -> service.reject("shweta", pending.refund.id, decision("")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("APPROVER_REQUIRED");
+        assertThat(service.dashboard().payments).isEmpty();
+    }
+
+    @Test
+    void simultaneousApprovalRetriesSendExactlyOnePayment() throws Exception {
+        RefundResult pending = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<RefundResult>> futures = new ArrayList<>();
+            for (int i = 0; i < 24; i++) {
+                futures.add(executor.submit(() -> {
+                    start.await();
+                    return service.approve("dahnesh", pending.refund.id, decision("Approved"));
+                }));
+            }
+            start.countDown();
+            for (Future<RefundResult> future : futures) {
+                assertThat(future.get(15, TimeUnit.SECONDS).payment.id).isEqualTo("PAY-3001");
+            }
+            assertThat(service.dashboard().payments).hasSize(1);
+            verify(provider, times(1)).send(anyString(), any(), any());
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     @Test
@@ -163,12 +224,22 @@ class RefundServiceTest {
                 users.loadUserByUsername("shweta").getPassword())).isTrue();
     }
 
-    private RefundRequest request(String key) {
+    private RefundRequest request(String key, String orderId) {
         RefundRequest request = new RefundRequest();
-        request.orderId = "ORD-1042";
+        request.orderId = orderId;
         request.reason = RefundRequest.Reason.RETURNED_ITEM;
         request.notes = "Synthetic return";
         request.idempotencyKey = key;
         return request;
+    }
+
+    private ApprovalDecisionRequest decision(String notes) {
+        ApprovalDecisionRequest request = new ApprovalDecisionRequest();
+        request.notes = notes;
+        return request;
+    }
+
+    private RefundModels.Order order(Dashboard dashboard, String orderId) {
+        return dashboard.orders.stream().filter(order -> order.id.equals(orderId)).findFirst().orElseThrow();
     }
 }

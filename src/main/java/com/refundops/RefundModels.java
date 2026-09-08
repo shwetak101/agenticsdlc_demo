@@ -10,12 +10,13 @@ public final class RefundModels {
 
     public static final class Application {
         public final String name = "RefundOps";
-        public final String version = "Legacy baseline";
+        public final String version = "High-value approval candidate";
         public final String javaBaseline = "11";
         public final String springBootVersion = "2.7.18";
-        public final String mode = "AUTO_PROCESS";
+        public final String mode = "THRESHOLD_APPROVAL";
         public final String provider = "MockPay";
         public final String storage = "In-memory";
+        public final BigDecimal approvalThreshold = new BigDecimal("10000");
     }
 
     public static final class Dashboard {
@@ -24,12 +25,16 @@ public final class RefundModels {
         public final List<Refund> refunds;
         public final List<Payment> payments;
         public final List<Event> events;
+        public final List<Refund> approvalQueue;
 
         public Dashboard(List<Order> orders, List<Refund> refunds, List<Payment> payments, List<Event> events) {
             this.orders = List.copyOf(orders);
             this.refunds = List.copyOf(refunds);
             this.payments = List.copyOf(payments);
             this.events = List.copyOf(events);
+            this.approvalQueue = refunds.stream()
+                    .filter(refund -> "PENDING_APPROVAL".equals(refund.status))
+                    .collect(java.util.stream.Collectors.toUnmodifiableList());
         }
     }
 
@@ -65,6 +70,16 @@ public final class RefundModels {
             return new Order(id, customerName, customerInitials, customerEmail, product, category, amount,
                     purchasedAt, paymentMethod, "REFUND_SENT");
         }
+
+        public Order refundPending() {
+            return new Order(id, customerName, customerInitials, customerEmail, product, category, amount,
+                    purchasedAt, paymentMethod, "REFUND_PENDING");
+        }
+
+        public Order refundRejected() {
+            return new Order(id, customerName, customerInitials, customerEmail, product, category, amount,
+                    purchasedAt, paymentMethod, "REFUND_REJECTED");
+        }
     }
 
     public static final class Refund {
@@ -77,12 +92,17 @@ public final class RefundModels {
         public final String requesterName;
         public final String reason;
         public final String notes;
-        public final String status = "SENT_TO_PROVIDER";
+        public final String status;
         public final Instant requestedAt;
         public final String paymentId;
+        public final String decidedByUsername;
+        public final String decidedByName;
+        public final Instant decidedAt;
+        public final String decisionNotes;
 
         public Refund(String id, Order order, DemoUsers.User requester, String reason, String notes,
-                      Instant requestedAt, String paymentId) {
+                      String status, Instant requestedAt, String paymentId, DemoUsers.User decidedBy,
+                      Instant decidedAt, String decisionNotes) {
             this.id = id;
             this.orderId = order.id;
             this.customerName = order.customerName;
@@ -91,8 +111,37 @@ public final class RefundModels {
             this.requesterName = requester.displayName;
             this.reason = reason;
             this.notes = notes;
+            this.status = status;
             this.requestedAt = requestedAt;
             this.paymentId = paymentId;
+            this.decidedByUsername = decidedBy == null ? null : decidedBy.username;
+            this.decidedByName = decidedBy == null ? null : decidedBy.displayName;
+            this.decidedAt = decidedAt;
+            this.decisionNotes = decisionNotes;
+        }
+
+        public Refund decide(String status, String paymentId, DemoUsers.User decidedBy,
+                             Instant decidedAt, String decisionNotes) {
+            return new Refund(this, status, paymentId, decidedBy, decidedAt, decisionNotes);
+        }
+
+        private Refund(Refund original, String status, String paymentId, DemoUsers.User decidedBy,
+                       Instant decidedAt, String decisionNotes) {
+            this.id = original.id;
+            this.orderId = original.orderId;
+            this.customerName = original.customerName;
+            this.amount = original.amount;
+            this.requesterUsername = original.requesterUsername;
+            this.requesterName = original.requesterName;
+            this.reason = original.reason;
+            this.notes = original.notes;
+            this.status = status;
+            this.requestedAt = original.requestedAt;
+            this.paymentId = paymentId;
+            this.decidedByUsername = decidedBy.username;
+            this.decidedByName = decidedBy.displayName;
+            this.decidedAt = decidedAt;
+            this.decisionNotes = decisionNotes;
         }
     }
 

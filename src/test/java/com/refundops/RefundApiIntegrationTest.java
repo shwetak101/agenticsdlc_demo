@@ -128,6 +128,9 @@ class RefundApiIntegrationTest {
         mvc.perform(post("/api/refunds").servletPath("/api/refunds")
                         .contentType(MediaType.APPLICATION_JSON).content(payload("ORD-1042").toString()))
                 .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
+        mvc.perform(post("/api/refunds/RF-2001/approve").with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
     }
 
     @Test
@@ -168,12 +171,13 @@ class RefundApiIntegrationTest {
                 .andExpect(jsonPath("$.refunds", hasSize(0)))
                 .andExpect(jsonPath("$.payments", hasSize(0)))
                 .andExpect(jsonPath("$.events", hasSize(1)))
+                .andExpect(jsonPath("$.approvalQueue", hasSize(0)))
                 .andReturn());
-        assertThat(dashboard.size()).isEqualTo(5);
+        assertThat(dashboard.size()).isEqualTo(6);
         assertThat(dashboard.get("application")).isEqualTo(mapper.readTree(
-                "{\"name\":\"RefundOps\",\"version\":\"Legacy baseline\",\"javaBaseline\":\"11\","
-                        + "\"springBootVersion\":\"2.7.18\",\"mode\":\"AUTO_PROCESS\","
-                        + "\"provider\":\"MockPay\",\"storage\":\"In-memory\"}"));
+                "{\"name\":\"RefundOps\",\"version\":\"High-value approval candidate\",\"javaBaseline\":\"11\","
+                        + "\"springBootVersion\":\"2.7.18\",\"mode\":\"THRESHOLD_APPROVAL\","
+                        + "\"provider\":\"MockPay\",\"storage\":\"In-memory\",\"approvalThreshold\":10000}"));
         for (JsonNode order : dashboard.get("orders")) {
             assertThat(order.size()).isEqualTo(11);
             assertThat(order.get("status").asText()).isEqualTo("PAID");
@@ -188,12 +192,9 @@ class RefundApiIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({
-            "shweta,ORD-1042,84990", "shweta,ORD-1043,64999", "shweta,ORD-1044,25000",
-            "shweta,ORD-1045,10000", "shweta,ORD-1046,2500", "shweta,ORD-1047,1499",
-            "dahnesh,ORD-1042,84990", "dahnesh,ORD-1045,10000", "dahnesh,ORD-1047,1499"
-    })
-    void everyValidFullOrderRefundIsImmediatelySent(String username, String orderId, int amount)
+    @CsvSource({"shweta,ORD-1045,10000", "shweta,ORD-1046,2500", "shweta,ORD-1047,1499",
+            "dahnesh,ORD-1045,10000", "dahnesh,ORD-1047,1499"})
+    void refundsAtOrBelowThresholdAreImmediatelySent(String username, String orderId, int amount)
             throws Exception {
         Session auth = login(username);
         ObjectNode request = payload(orderId);
@@ -214,7 +215,7 @@ class RefundApiIntegrationTest {
                 .andExpect(jsonPath("$.payment.provider").value("MockPay"))
                 .andExpect(jsonPath("$.payment.requesterName").value(DemoUsers.get(username).displayName))
                 .andReturn());
-        assertThat(result.get("refund").size()).isEqualTo(12);
+        assertThat(result.get("refund").size()).isEqualTo(16);
         assertThat(result.get("payment").size()).isEqualTo(9);
         assertThat(result.at("/refund/paymentId")).isEqualTo(result.at("/payment/id"));
         assertThat(result.at("/payment/refundId")).isEqualTo(result.at("/refund/id"));
@@ -226,10 +227,61 @@ class RefundApiIntegrationTest {
     }
 
     @Test
+    void shwetaHighValueRefundRequiresDahneshApproval() throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.refund.status").value("PENDING_APPROVAL"))
+                .andExpect(jsonPath("$.refund.requesterUsername").value("shweta"))
+                .andExpect(jsonPath("$.payment").value(nullValue()))
+                .andReturn());
+        String refundId = pending.at("/refund/id").asText();
+        mvc.perform(get("/api/dashboard").session(dahnesh.http))
+                .andExpect(jsonPath("$.approvalQueue", hasSize(1)))
+                .andExpect(jsonPath("$.payments", hasSize(0)));
+        mvc.perform(decision(shweta, refundId, "approve"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        mvc.perform(decision(dahnesh, refundId, "approve"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refund.status").value("SENT_TO_PROVIDER"))
+                .andExpect(jsonPath("$.refund.decidedByUsername").value("dahnesh"))
+                .andExpect(jsonPath("$.payment.id").value("PAY-3001"));
+        mvc.perform(decision(dahnesh, refundId, "approve"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true))
+                .andExpect(jsonPath("$.payment.id").value("PAY-3001"));
+        assertThat(service.dashboard().payments).hasSize(1);
+    }
+
+    @Test
+    void dahneshCannotApproveOwnHighValueRefundAndRejectionSendsNoPayment() throws Exception {
+        Session dahnesh = login("dahnesh");
+        JsonNode own = json(mvc.perform(refund(dahnesh, payload("ORD-1044")))
+                .andExpect(status().isCreated()).andReturn());
+        mvc.perform(decision(dahnesh, own.at("/refund/id").asText(), "approve"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("SELF_APPROVAL_FORBIDDEN"));
+        assertThat(service.dashboard().payments).isEmpty();
+
+        service.reset();
+        Session shweta = login("shweta");
+        JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
+                .andExpect(status().isCreated()).andReturn());
+        mvc.perform(decision(dahnesh, pending.at("/refund/id").asText(), "reject"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refund.status").value("REJECTED"))
+                .andExpect(jsonPath("$.refund.decidedByUsername").value("dahnesh"))
+                .andExpect(jsonPath("$.payment").value(nullValue()));
+        assertThat(service.dashboard().payments).isEmpty();
+    }
+
+    @Test
     void replayReturnsOriginalAndConflictingKeysOrOrdersNeverCreateAnotherPayment() throws Exception {
         Session dahnesh = login("dahnesh");
         Session shweta = login("shweta");
-        ObjectNode request = payload("ORD-1042");
+        ObjectNode request = payload("ORD-1046");
         JsonNode original = json(mvc.perform(refund(dahnesh, request))
                 .andExpect(status().isCreated()).andReturn());
         JsonNode replay = json(mvc.perform(refund(dahnesh, request))
@@ -244,7 +296,7 @@ class RefundApiIntegrationTest {
             mvc.perform(refund(dahnesh, changed)).andExpect(status().isConflict())
                     .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"));
         }
-        mvc.perform(refund(dahnesh, payload("ORD-1042"))).andExpect(status().isConflict())
+        mvc.perform(refund(dahnesh, payload("ORD-1046"))).andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("ORDER_ALREADY_REFUNDED"));
         assertThat(service.dashboard().refunds).hasSize(1);
         assertThat(service.dashboard().payments).hasSize(1);
@@ -256,7 +308,7 @@ class RefundApiIntegrationTest {
         Session dahnesh = login("dahnesh");
         Session shweta = login("shweta");
         JsonNode original = json(mvc.perform(get("/api/dashboard").session(shweta.http)).andReturn());
-        ObjectNode request = payload("ORD-1042");
+        ObjectNode request = payload("ORD-1046");
         mvc.perform(refund(dahnesh, request)).andExpect(status().isCreated());
         mvc.perform(get("/api/dashboard").session(shweta.http))
                 .andExpect(jsonPath("$.refunds", hasSize(1)));
@@ -377,6 +429,12 @@ class RefundApiIntegrationTest {
     private MockHttpServletRequestBuilder refund(Session auth, ObjectNode request) {
         return post("/api/refunds").session(auth.http).header(auth.headerName, auth.token)
                 .contentType(MediaType.APPLICATION_JSON).content(request.toString());
+    }
+
+    private MockHttpServletRequestBuilder decision(Session auth, String refundId, String action) {
+        return post("/api/refunds/{refundId}/{action}", refundId, action)
+                .session(auth.http).header(auth.headerName, auth.token)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"notes\":\"Independent review\"}");
     }
 
     private JsonNode json(MvcResult result) throws Exception {

@@ -218,6 +218,10 @@ tbody tr:hover { background: var(--cp-bg-elevated); }
 .status-pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--cp-border-strong); }
 .status-pill.sent { background: var(--cp-accent-soft); border-color: var(--cp-highlight); color: var(--cp-accent); }
 .status-pill.sent::before { background: var(--cp-accent); }
+.status-pill.pending { background: rgba(245, 158, 11, 0.12); border-color: var(--cp-warning); color: var(--cp-text); }
+.status-pill.pending::before { background: var(--cp-warning); }
+.status-pill.rejected { background: rgba(220, 38, 38, 0.08); border-color: var(--cp-danger); color: var(--cp-danger); }
+.status-pill.rejected::before { background: var(--cp-danger); }
 .table-action { border: 1px solid var(--cp-highlight); background: var(--cp-accent-soft); color: var(--cp-accent); border-radius: 7px; padding: 8px 10px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 5px; }
 .table-action svg { width: 13px; height: 13px; }
 .table-action:hover { color: var(--cp-accent); border-color: var(--cp-accent); }
