@@ -31,26 +31,26 @@ try {
         throw 'Expected one application JAR in target. Run .\Start-Demo.ps1 without -SkipBuild.'
     }
 
-    $generatedDahnesh = [string]::IsNullOrWhiteSpace($env:REFUNDS_DAHNESH_PASSWORD)
-    $generatedShweta = [string]::IsNullOrWhiteSpace($env:REFUNDS_SHWETA_PASSWORD)
-    if ($generatedDahnesh) {
-        $env:REFUNDS_DAHNESH_PASSWORD = 'demo-' + [guid]::NewGuid().ToString('N').Substring(0, 16)
+    $defaultDahnesh = [string]::IsNullOrWhiteSpace($env:REFUNDS_DAHNESH_PASSWORD)
+    $defaultShweta = [string]::IsNullOrWhiteSpace($env:REFUNDS_SHWETA_PASSWORD)
+    if ($defaultDahnesh) {
+        $env:REFUNDS_DAHNESH_PASSWORD = 'dahnesh'
     }
-    if ($generatedShweta) {
-        $env:REFUNDS_SHWETA_PASSWORD = 'demo-' + [guid]::NewGuid().ToString('N').Substring(0, 16)
+    if ($defaultShweta) {
+        $env:REFUNDS_SHWETA_PASSWORD = 'shweta'
     }
 
     Write-Host ''
     Write-Host 'RefundOps | Legacy baseline | Local mock payments only'
     Write-Host "Open http://127.0.0.1:$Port"
     Write-Host ''
-    Write-Host 'Local demo sign-in (passwords are not stored in source):'
-    if ($generatedDahnesh) {
+    Write-Host 'Public demo-only sign-ins. Never use these accounts for real data or production.'
+    if ($defaultDahnesh) {
         Write-Host "  dahnesh  /  $($env:REFUNDS_DAHNESH_PASSWORD)  [Requestor + Approver]"
     } else {
         Write-Host '  dahnesh  /  password supplied by REFUNDS_DAHNESH_PASSWORD'
     }
-    if ($generatedShweta) {
+    if ($defaultShweta) {
         Write-Host "  shweta   /  $($env:REFUNDS_SHWETA_PASSWORD)  [Requestor]"
     } else {
         Write-Host '  shweta   /  password supplied by REFUNDS_SHWETA_PASSWORD'
@@ -60,16 +60,16 @@ try {
     Write-Host 'This unsupported framework baseline is for isolated demonstrations, not production.'
     Write-Host ''
 
-    & java '-Dfile.encoding=UTF-8' '-jar' $jars[0].FullName "--server.port=$Port"
+    & java '-Dfile.encoding=UTF-8' '-jar' $jars[0].FullName "--server.port=$Port" '--server.address=127.0.0.1'
     if ($LASTEXITCODE -ne 0) {
         throw "The application exited with code $LASTEXITCODE."
     }
 } finally {
-    if (Get-Variable generatedDahnesh -ErrorAction SilentlyContinue) {
-        if ($generatedDahnesh) { Remove-Item Env:\REFUNDS_DAHNESH_PASSWORD -ErrorAction SilentlyContinue }
+    if (Get-Variable defaultDahnesh -ErrorAction SilentlyContinue) {
+        if ($defaultDahnesh) { Remove-Item Env:\REFUNDS_DAHNESH_PASSWORD -ErrorAction SilentlyContinue }
     }
-    if (Get-Variable generatedShweta -ErrorAction SilentlyContinue) {
-        if ($generatedShweta) { Remove-Item Env:\REFUNDS_SHWETA_PASSWORD -ErrorAction SilentlyContinue }
+    if (Get-Variable defaultShweta -ErrorAction SilentlyContinue) {
+        if ($defaultShweta) { Remove-Item Env:\REFUNDS_SHWETA_PASSWORD -ErrorAction SilentlyContinue }
     }
     Pop-Location
 }

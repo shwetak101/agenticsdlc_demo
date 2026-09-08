@@ -23,8 +23,8 @@ From this directory in PowerShell:
 
     .\Start-Demo.ps1
 
-The launcher builds the application and prints two newly generated local
-demo passwords. Open:
+The launcher builds the application and uses the public demo-only sign-ins
+listed below. It enforces a loopback-only bind (127.0.0.1). Open:
 
     http://127.0.0.1:8080
 
@@ -46,6 +46,13 @@ Users and credentials
 dahnesh -> Dahnesh -> Requestor + Approver
 shweta  -> Shweta  -> Requestor
 
+Default username / password:
+    dahnesh / dahnesh
+    shweta  / shweta
+
+These publicly documented defaults are only for the local synthetic demo.
+They are not secrets and must never protect real data or production systems.
+
 Both users can request refunds. The Approver role is assigned server-side but
 has no approval action in this legacy version. Selecting a user on the login
 screen does not authenticate them; their password is still required.
@@ -56,7 +63,8 @@ local demo passwords:
     REFUNDS_DAHNESH_PASSWORD
     REFUNDS_SHWETA_PASSWORD
 
-Do not store credentials in source, commit them or reuse real account passwords.
+Environment-variable overrides take precedence over the demo defaults.
+Never commit override passwords or reuse real account passwords.
 Sessions use Spring Security, server-assigned roles and CSRF protection.
 HTTP is acceptable here only because this is a loopback-only local demo.
 
