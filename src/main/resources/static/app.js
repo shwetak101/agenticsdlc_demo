@@ -69,9 +69,23 @@
   const sentPayments = () => state.data ? state.data.payments.filter(payment => payment.status === "SENT_TO_PROVIDER") : [];
   const roles = user => (user.roles || []).map(role => role === "REQUESTOR" ? "Requestor" : role === "APPROVER" ? "Approver" : role).join(" + ");
   const hasRequestRole = () => state.session?.user?.roles?.includes("REQUESTOR");
+  const hasApproveRole = () => state.session?.user?.roles?.includes("APPROVER");
+  const canDecide = refund => Boolean(refund) && refund.status === "PENDING_APPROVAL" && hasApproveRole()
+    && refund.requesterUsername !== state.session?.user?.username;
   const avatar = (name, text, rose = false) => `<span class="avatar${rose ? " rose" : ""}" aria-hidden="true">${escape(text || initials(name))}</span>`;
   const brand = () => '<div class="brand"><div class="brand-mark" aria-hidden="true">R<span>↗</span></div><div><div class="brand-name">RefundOps</div><div class="brand-caption">Operations, in view</div></div></div>';
-  const status = sent => `<span class="status-pill${sent ? " sent" : ""}">${sent ? "Sent to provider" : "Eligible"}</span>`;
+  const status = value => {
+    const key = value === true ? "SENT_TO_PROVIDER" : value === false ? "PAID" : value;
+    const labels = {
+      PAID: "Eligible", REFUND_PENDING: "Pending approval", PENDING_APPROVAL: "Pending approval",
+      REFUND_SENT: "Sent to provider", SENT_TO_PROVIDER: "Sent to provider",
+      REFUND_REJECTED: "Rejected", REJECTED: "Rejected"
+    };
+    const style = ["REFUND_SENT", "SENT_TO_PROVIDER"].includes(key) ? " sent"
+      : ["REFUND_PENDING", "PENDING_APPROVAL"].includes(key) ? " pending"
+      : ["REFUND_REJECTED", "REJECTED"].includes(key) ? " rejected" : "";
+    return `<span class="status-pill${style}">${labels[key] || escape(key)}</span>`;
+  };
   const providerName = value => value === "MockPay" ? "Payment gateway" : value;
   const announce = message => { $("#announcer").textContent = message; };
   const toast = message => {
@@ -164,7 +178,7 @@
   }
 
   function useDashboard(data) {
-    if (!data.application || !["orders", "refunds", "payments", "events"].every(key => Array.isArray(data[key]))) {
+    if (!data.application || !["orders", "refunds", "payments", "events", "approvalQueue"].every(key => Array.isArray(data[key]))) {
       throw new ApiError("The dashboard response is incomplete. Please refresh; no substitute data is being shown.");
     }
     state.data = data;
@@ -282,19 +296,20 @@
     }
   }
 
-  const navNames = { overview: "Overview", orders: "Orders", payments: "Payment ledger", activity: "Activity" };
+  const navNames = { overview: "Overview", orders: "Orders", approvals: "Approvals", payments: "Payment ledger", activity: "Activity" };
   function renderApp() {
     if (!state.session?.authenticated) return;
     const user = state.session.user;
-    const counts = state.data ? { orders: state.data.orders.length, payments: state.data.payments.length, activity: state.data.events.length } : {};
+    const counts = state.data ? { orders: state.data.orders.length, approvals: state.data.approvalQueue.length, payments: state.data.payments.length, activity: state.data.events.length } : {};
+    const visibleNav = Object.entries(navNames).filter(([view]) => view !== "approvals" || user.roles.includes("APPROVER"));
     root.innerHTML = `<button class="mobile-shade" data-action="menu-close" aria-label="Close navigation" tabindex="-1"></button>
       <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
         <div class="sidebar-brand">${brand()}<button class="icon-button sidebar-close" data-action="menu-close" aria-label="Close navigation">${icon("close")}</button></div>
         <div class="workspace"><div class="workspace-top"><span>Refund operations</span></div><small>Customer service · India</small></div>
         <div class="nav-label">Workspace</div>
-        <nav class="navigation" aria-label="Main navigation">${Object.entries(navNames).map(([view, label]) => `<button class="nav-link${state.view === view ? " active" : ""}" data-action="navigate" data-view="${view}" ${state.view === view ? 'aria-current="page"' : ""}>${icon({ overview: "grid", orders: "box", payments: "ledger", activity: "activity" }[view])}<span>${label}</span>${counts[view] !== undefined ? `<span class="nav-count">${number(counts[view])}</span>` : ""}</button>`).join("")}</nav>
+        <nav class="navigation" aria-label="Main navigation">${visibleNav.map(([view, label]) => `<button class="nav-link${state.view === view ? " active" : ""}" data-action="navigate" data-view="${view}" ${state.view === view ? 'aria-current="page"' : ""}>${icon({ overview: "grid", orders: "box", approvals: "shield", payments: "ledger", activity: "activity" }[view])}<span>${label}</span>${counts[view] !== undefined ? `<span class="nav-count">${number(counts[view])}</span>` : ""}</button>`).join("")}</nav>
         <div class="sidebar-bottom">
-          <div class="mode-note"><h3>${icon("bolt")}Automatic processing</h3><p>Eligible refund requests are sent directly to the payment gateway.</p></div>
+          <div class="mode-note"><h3>${icon("shield")}Threshold approvals</h3><p>Refunds above ₹10,000 require an independent decision.</p></div>
           <button class="btn subtle sidebar-reset" data-action="info">${icon("info")}Workspace details</button>
           <div class="identity">${avatar(user.displayName, null, true)}<div class="identity-copy"><strong>${escape(user.displayName)}</strong><small>${escape(roles(user))}</small><small>@${escape(user.username)}</small></div><button class="icon-button" data-action="logout" aria-label="Sign out" title="Sign out">${icon("logout")}</button></div>
         </div>
@@ -309,6 +324,7 @@
     const headings = {
       overview: ["YOUR WORKSPACE", "Refund operations", "Select an order below to request a refund."],
       orders: ["CUSTOMER ORDERS", "Find an order", "Search by order number, customer or product, then select Request refund."],
+      approvals: ["INDEPENDENT REVIEW", "Approval queue", "Review high-value requests submitted by another user."],
       payments: ["PAYMENTS", "Payment ledger", "Track refund instructions sent to the payment gateway."],
       activity: ["WORKSPACE ACTIVITY", "Every action, recorded", "Follow refund requests and the people behind them."]
     };
@@ -317,7 +333,7 @@
   }
 
   function baselineBanner() {
-    return `<div class="baseline-banner">${icon("bolt")}<div><strong>Automatic processing</strong><p>Eligible refunds of any amount are sent directly to the payment gateway.</p></div><span class="badge accent">ENABLED</span></div>`;
+    return `<div class="baseline-banner">${icon("shield")}<div><strong>High-value approval</strong><p>Refunds above ₹10,000 wait for an independent approver. Lower amounts process automatically.</p></div><span class="badge accent">ENABLED</span></div>`;
   }
 
   function metadata() {
@@ -330,6 +346,7 @@
     if (!state.data) return html + `<section class="panel">${empty("No records loaded yet", "Check that the backend is running, then refresh. Metrics will appear only after live data is available.", "ledger")}</section>` + metadata();
     if (state.view === "overview") html += metrics() + baselineBanner() + ordersPanel() + insights();
     if (state.view === "orders") html += baselineBanner() + ordersPanel();
+    if (state.view === "approvals") html += approvalPanel();
     if (state.view === "payments") html += ledgerPanel();
     if (state.view === "activity") html += activityPanel();
     return html + metadata();
@@ -341,9 +358,10 @@
     const highPayments = payments.filter(payment => payment.amount > 10000);
     const metricsData = [
       ["Eligible orders", number(eligible().length), `of ${number(state.data.orders.length)} orders in this portfolio`, "box", false],
+      ["Pending approval", number(state.data.approvalQueue.length), "Above ₹10,000 · no payment sent", "clock", false],
       ["Refunds sent", number(refunds.length), "Automatically processed", "receipt", false],
       ["Amount sent", money(sum(payments)), "Sent to the payment gateway", "diagonal", true],
-      ["High-value payments", number(highPayments.length), `Above ₹10,000 · ${money(sum(highPayments))} sent`, "shield", false]
+      ["Approved high-value", number(highPayments.length), `Above ₹10,000 · ${money(sum(highPayments))} sent`, "shield", false]
     ];
     return `<section class="metrics" aria-label="Live portfolio metrics">${metricsData.map(([label, value, note, glyph, featured]) => `<article class="metric${featured ? " featured" : ""}"><div class="metric-top"><span>${label}</span><span class="metric-icon">${icon(glyph)}</span></div><div class="metric-value">${value}</div><p>${escape(note)}</p></article>`).join("")}</section>`;
   }
@@ -382,7 +400,7 @@
   function orderRows() {
     const orders = orderMatches();
     if (!orders.length) return `<tr><td colspan="6">${empty(state.data.orders.length ? "No matching orders" : "No orders available", state.data.orders.length ? "Try a different search or clear the filters to see all orders." : "Refresh to check for available orders.", "box", false, state.data.orders.length ? '<button class="btn small" data-action="clear-orders">Clear filters</button>' : "")}</td></tr>`;
-    return orders.map(order => `<tr><td><div class="customer-cell">${avatar(order.customerName, order.customerInitials)}<div><span class="cell-primary">${escape(order.customerName)}</span><span class="cell-secondary mono">${escape(order.id)}</span></div></div></td><td><span class="cell-primary">${escape(order.product)}</span><span class="cell-secondary">${escape(order.category)}</span></td><td class="amount-cell">${money(order.amount)}${order.amount > 10000 ? "<small>High value</small>" : ""}</td><td><span>${escape(date(order.purchasedAt))}</span><span class="cell-secondary">${escape(order.paymentMethod)}</span></td><td>${status(order.status === "REFUND_SENT")}</td><td>${order.status === "PAID" ? `<button class="table-action" data-action="order-refund" data-id="${escape(order.id)}" aria-label="Request refund for ${escape(order.customerName)}, ${escape(order.id)}" ${hasRequestRole() ? "" : "disabled"}>Request refund ${icon("arrow")}</button>` : `<button class="text-button" data-action="order-payment" data-id="${escape(order.id)}">View payment ${icon("diagonal")}</button>`}</td></tr>`).join("");
+    return orders.map(order => `<tr><td><div class="customer-cell">${avatar(order.customerName, order.customerInitials)}<div><span class="cell-primary">${escape(order.customerName)}</span><span class="cell-secondary mono">${escape(order.id)}</span></div></div></td><td><span class="cell-primary">${escape(order.product)}</span><span class="cell-secondary">${escape(order.category)}</span></td><td class="amount-cell">${money(order.amount)}${order.amount > 10000 ? "<small>Independent approval required</small>" : ""}</td><td><span>${escape(date(order.purchasedAt))}</span><span class="cell-secondary">${escape(order.paymentMethod)}</span></td><td>${status(order.status)}</td><td>${order.status === "PAID" ? `<button class="table-action" data-action="order-refund" data-id="${escape(order.id)}" aria-label="Request refund for ${escape(order.customerName)}, ${escape(order.id)}" ${hasRequestRole() ? "" : "disabled"}>Request refund ${icon("arrow")}</button>` : order.status === "REFUND_SENT" ? `<button class="text-button" data-action="order-payment" data-id="${escape(order.id)}">View payment ${icon("diagonal")}</button>` : order.status === "REFUND_PENDING" ? (canDecide(state.data.approvalQueue.find(item => item.orderId === order.id)) ? `<button class="table-action" data-action="approval-review" data-id="${escape(state.data.approvalQueue.find(item => item.orderId === order.id).id)}">Review ${icon("arrow")}</button>` : `<span class="cell-secondary">Awaiting decision</span>`) : `<span class="cell-secondary">Decision recorded</span>`}</td></tr>`).join("");
   }
 
   function paymentMatches() {
@@ -402,15 +420,36 @@
   function paymentRows() {
     const payments = paymentMatches();
     if (!payments.length) return `<tr><td colspan="6">${empty(state.data.payments.length ? "No matching payments" : "No payments yet", state.data.payments.length ? "Change your search or amount filter to find a payment." : "Request a refund from an eligible order. Its payment instruction will appear here.", "ledger", false, state.data.payments.length ? '<button class="btn small" data-action="clear-payments">Clear filters</button>' : `<button class="btn small" data-action="navigate" data-view="orders">View orders ${icon("arrow")}</button>`)}</td></tr>`;
-    return payments.map(payment => `<tr><td><span class="cell-primary mono">${escape(payment.id)}</span><span class="cell-secondary mono">${escape(payment.orderId)}</span></td><td><div class="customer-cell">${avatar(payment.requesterName, null, true)}<span>${escape(payment.requesterName)}</span></div></td><td class="amount-cell">${money(payment.amount)}${payment.amount > 10000 ? "<small>High value · no approval gate</small>" : ""}</td><td>${escape(date(payment.sentAt, true))}</td><td>${status(true)}</td><td><button class="table-action" data-action="payment" data-id="${escape(payment.id)}" aria-label="View details for payment ${escape(payment.id)}">Details ${icon("diagonal")}</button></td></tr>`).join("");
+    return payments.map(payment => `<tr><td><span class="cell-primary mono">${escape(payment.id)}</span><span class="cell-secondary mono">${escape(payment.orderId)}</span></td><td><div class="customer-cell">${avatar(payment.requesterName, null, true)}<span>${escape(payment.requesterName)}</span></div></td><td class="amount-cell">${money(payment.amount)}${payment.amount > 10000 ? "<small>Independently approved</small>" : "<small>Automatic processing</small>"}</td><td>${escape(date(payment.sentAt, true))}</td><td>${status(true)}</td><td><button class="table-action" data-action="payment" data-id="${escape(payment.id)}" aria-label="View details for payment ${escape(payment.id)}">Details ${icon("diagonal")}</button></td></tr>`).join("");
+  }
+
+  function approvalPanel() {
+    const queue = newest(state.data.approvalQueue, "requestedAt");
+    const history = newest(state.data.refunds.filter(refund => refund.status !== "PENDING_APPROVAL"), "requestedAt");
+    const queueRows = queue.length ? queue.map(refund => {
+      const independent = canDecide(refund);
+      return `<tr><td><span class="cell-primary mono">${escape(refund.id)}</span><span class="cell-secondary mono">${escape(refund.orderId)}</span></td><td><div class="customer-cell">${avatar(refund.requesterName)}<div><span class="cell-primary">${escape(refund.requesterName)}</span><span class="cell-secondary mono">@${escape(refund.requesterUsername)}</span></div></div></td><td class="amount-cell">${money(refund.amount)}<small>High value</small></td><td>${escape(reasons[refund.reason] || refund.reason)}</td><td>${status(refund.status)}</td><td>${independent ? `<button class="table-action" data-action="approval-review" data-id="${escape(refund.id)}">Review ${icon("arrow")}</button>` : '<span class="cell-secondary">Independent approver required</span>'}</td></tr>`;
+    }).join("") : `<tr><td colspan="6">${empty("No requests awaiting approval", "High-value refund requests from another user will appear here.", "shield")}</td></tr>`;
+    const historyRows = history.length ? history.map(refund => `<tr><td><span class="cell-primary mono">${escape(refund.id)}</span><span class="cell-secondary mono">${escape(refund.orderId)}</span></td><td>${escape(refund.requesterName)}<span class="cell-secondary mono">@${escape(refund.requesterUsername)}</span></td><td class="amount-cell">${money(refund.amount)}</td><td>${status(refund.status)}</td><td>${refund.decidedByName ? `${escape(refund.decidedByName)}<span class="cell-secondary mono">@${escape(refund.decidedByUsername)}</span>` : '<span class="cell-secondary">Automatic processing</span>'}</td><td>${escape(date(refund.decidedAt || refund.requestedAt, true))}</td></tr>`).join("")
+      : `<tr><td colspan="6">${empty("No decisions recorded", "Approved and rejected requests will appear here.", "activity")}</td></tr>`;
+    return `<section class="panel"><div class="panel-head"><div><h2>Awaiting independent review <span class="badge neutral">${number(queue.length)}</span></h2><p>Approving sends one payment instruction. Rejecting sends none.</p></div><span class="badge accent">ABOVE ₹10,000</span></div><div class="table-scroll" tabindex="0" role="region" aria-label="Approval queue"><table><thead><tr><th>Refund / order</th><th>Requested by</th><th>Amount</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead><tbody>${queueRows}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><div><h2>Refund decision history</h2><p>Requester and independent decision identity</p></div></div><div class="table-scroll" tabindex="0" role="region" aria-label="Refund decision history"><table><thead><tr><th>Refund / order</th><th>Requested by</th><th>Amount</th><th>Outcome</th><th>Decided by</th><th>Recorded</th></tr></thead><tbody>${historyRows}</tbody></table></div></section>`;
   }
 
   function eventRow(event, compact = false) {
     const refund = state.data.refunds.find(item => item.id === event.refundId);
-    const title = event.type === "BASELINE_READY" ? "Order portfolio available" : event.type === "REFUND_SENT" ? "Refund sent to provider" : event.title;
-    const detail = event.type === "BASELINE_READY" ? "Customer orders are available for refund requests."
+    const title = ["BASELINE_READY", "CANDIDATE_READY"].includes(event.type) ? "Order portfolio available" : event.type === "REFUND_SENT" ? "Refund sent to provider" : event.title;
+    const detail = ["BASELINE_READY", "CANDIDATE_READY"].includes(event.type) ? "Customer orders are available for refund requests."
       : event.type === "REFUND_SENT" && refund ? `${refund.orderId} · ${money(refund.amount)} · ${reasons[refund.reason] || refund.reason}` : event.detail;
-    return `<article class="activity-item"><div class="activity-glyph">${icon(event.refundId ? "diagonal" : "activity")}</div><div class="activity-copy"><strong>${escape(title)}</strong><p>${escape(detail)}</p><small>${escape(event.actorDisplayName || "System")}${!compact ? ` · ${escape(date(event.occurredAt, true))}` : ""}</small>${event.refundId && !compact ? `<button class="text-button" data-action="refund-payment" data-id="${escape(event.refundId)}">View payment ${icon("diagonal")}</button>` : ""}</div>${compact ? `<time class="activity-time" datetime="${escape(event.occurredAt)}" title="${escape(date(event.occurredAt, true))}">${escape(date(event.occurredAt))}</time>` : ""}</article>`;
+    const glyph = !event.refundId ? "activity"
+      : refund?.status === "PENDING_APPROVAL" ? "clock" : refund?.status === "REJECTED" ? "close" : "diagonal";
+    const hasPayment = Boolean(refund?.paymentId) || state.data.payments.some(item => item.refundId === event.refundId);
+    const action = compact || !event.refundId ? ""
+      : canDecide(refund) ? `<button class="text-button" data-action="approval-review" data-id="${escape(refund.id)}">Review request ${icon("arrow")}</button>`
+      : refund?.status === "PENDING_APPROVAL" ? `<small class="soft">${refund.requesterUsername === state.session?.user?.username ? "Waiting for an independent approver" : "Awaiting an approver decision"}</small>`
+      : refund?.status === "REJECTED" ? `<small class="soft">Rejected by ${escape(refund.decidedByName || "an approver")} · no payment sent</small>`
+      : hasPayment ? `<button class="text-button" data-action="refund-payment" data-id="${escape(event.refundId)}">View payment ${icon("diagonal")}</button>` : "";
+    return `<article class="activity-item"><div class="activity-glyph">${icon(glyph)}</div><div class="activity-copy"><strong>${escape(title)}</strong><p>${escape(detail)}</p><small>${escape(event.actorDisplayName || "System")}${!compact ? ` · ${escape(date(event.occurredAt, true))}` : ""}</small>${action}</div>${compact ? `<time class="activity-time" datetime="${escape(event.occurredAt)}" title="${escape(date(event.occurredAt, true))}">${escape(date(event.occurredAt))}</time>` : ""}</article>`;
   }
 
   function eventMatches() {
@@ -534,10 +573,10 @@
       ${draft.error ? `<div class="error-message" role="alert">${escape(draft.error)}</div>` : ""}
       <div class="detail-card"><div class="detail-hero"><small>Refund amount · INR</small><strong>${money(order.amount)}</strong><span class="badge accent">AUTOMATIC${order.amount > 10000 ? " · HIGH VALUE" : ""}</span></div>${detailList([["Customer", order.customerName], ["Order", order.id, true], ["Product", order.product], ["Reason", reasons[draft.reason]], ["Provider", "Payment gateway"]])}</div>
       ${draft.notes ? `<div class="notes-block"><h3>Request notes</h3><p>${escape(draft.notes)}</p></div>` : ""}
-      <div class="warning-box">${icon("bolt")}<div><h3>Automatic processing</h3><p>This sends ${money(order.amount)} directly to the payment gateway. No additional approval is required.</p></div></div>
-      ${draft.attempted ? `<p class="technical-note" style="margin-bottom:16px">Retrying uses the original request. If it was already processed, you will receive its existing receipt.</p>` : ""}
+      <div class="warning-box">${icon(order.amount > 10000 ? "shield" : "bolt")}<div><h3>${order.amount > 10000 ? "Independent approval required" : "Automatic processing"}</h3><p>${order.amount > 10000 ? `This request will enter the approval queue. No payment is sent until another user with the Approver role approves it.` : `This sends ${money(order.amount)} directly to the payment gateway. No additional approval is required.`}</p></div></div>
+      ${draft.attempted ? `<p class="technical-note" style="margin-bottom:16px">Retrying uses the original request. If it was already recorded, you will receive its existing result.</p>` : ""}
       <label class="consent"><input type="checkbox" id="send-consent" ${draft.confirmed ? "checked" : ""}><span>I confirm the details and want to send this refund.</span></label>
-      ${actorLine()}</div><div class="dialog-footer"><button class="btn" data-action="${[400, 409].includes(draft.lastStatus) ? "discard-request" : draft.attempted ? "dialog-close" : "refund-back"}">${[400, 409].includes(draft.lastStatus) ? "Close rejected request" : draft.attempted ? "Close for now" : "Back"}</button><button class="btn primary" data-action="send-refund" id="send-refund" ${draft.confirmed ? "" : "disabled"}>${icon("diagonal")}${draft.attempted ? "Retry same request" : "Send refund"}</button></div>`);
+      ${actorLine()}</div><div class="dialog-footer"><button class="btn" data-action="${[400, 409].includes(draft.lastStatus) ? "discard-request" : draft.attempted ? "dialog-close" : "refund-back"}">${[400, 409].includes(draft.lastStatus) ? "Close rejected request" : draft.attempted ? "Close for now" : "Back"}</button><button class="btn primary" data-action="send-refund" id="send-refund" ${draft.confirmed ? "" : "disabled"}>${icon(order.amount > 10000 ? "shield" : "diagonal")}${draft.attempted ? "Retry same request" : order.amount > 10000 ? "Submit for approval" : "Send refund"}</button></div>`);
   }
 
   async function sendRefund() {
@@ -553,7 +592,8 @@
       <div class="dialog-body"><div class="sending" role="status" aria-live="polite"><span class="spinner"></span><h3>${money(draft.orderSnapshot.amount)} · ${escape(draft.orderId)}</h3><p>Sending your request to the payment gateway.<br>Please keep this window open.</p></div>${actorLine()}</div>`);
     try {
       const result = await api("/api/refunds", { method: "POST", headers: { ...csrfHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(draft.payload) });
-      if (!result.refund || !result.payment || result.payment.status !== "SENT_TO_PROVIDER") {
+      const pendingApproval = result.refund?.status === "PENDING_APPROVAL" && result.payment == null;
+      if (!result.refund || (!pendingApproval && (!result.payment || result.payment.status !== "SENT_TO_PROVIDER"))) {
         throw new ApiError("The response did not include a valid provider receipt. Check the live records or explicitly retry this same request.");
       }
       state.pending = null;
@@ -564,8 +604,13 @@
       if (!state.session?.authenticated) return;
       state.busy = false;
       renderApp();
-      renderReceipt(result);
-      announce(`Sent to provider: ${money(result.payment.amount)}. ${result.payment.id}.`);
+      if (pendingApproval) {
+        renderPending(result.refund);
+        announce(`Pending approval: ${money(result.refund.amount)}. ${result.refund.id}.`);
+      } else {
+        renderReceipt(result);
+        announce(`Sent to provider: ${money(result.payment.amount)}. ${result.payment.id}.`);
+      }
     } catch (error) {
       if (error.status === 401) return;
       draft.lastStatus = error.status;
@@ -573,6 +618,51 @@
       draft.confirmed = false;
       state.busy = false;
       renderReview();
+    } finally { state.busy = false; }
+  }
+
+  function renderPending(refund) {
+    openDialog("pending", `${modalHeading("REFUND REQUEST", "Pending approval", "No payment instruction has been sent.")}
+      <div class="dialog-body"><div class="receipt-heading"><div class="receipt-icon">${icon("clock")}</div><h3>${money(refund.amount)}</h3><p>Waiting for an independent approver</p></div>
+      <div class="detail-card">${detailList([["Refund ID", refund.id, true], ["Order", refund.orderId, true], ["Requested by", refund.requesterName], ["Account", refund.requesterUsername, true], ["Status", "Pending approval"]])}</div>
+      <div class="warning-box">${icon("shield")}<div><h3>Payment blocked until approval</h3><p>An authenticated approver other than ${escape(refund.requesterName)} must approve this request before MockPay receives an instruction.</p></div></div></div>
+      <div class="dialog-footer"><button class="btn primary" data-action="dialog-close">Done</button></div>`);
+  }
+
+  function reviewApproval(refundId) {
+    const refund = state.data?.approvalQueue.find(item => item.id === refundId);
+    if (!refund) { toast("That request is no longer pending. Refresh the approval queue."); return; }
+    const ownRequest = refund.requesterUsername === state.session.user.username;
+    openDialog("approval", `${modalHeading("INDEPENDENT APPROVAL", "Review high-value refund", escape(refund.id))}
+      <div class="dialog-body"><div class="detail-card"><div class="detail-hero"><small>Refund amount · INR</small><strong>${money(refund.amount)}</strong>${status(refund.status)}</div>${detailList([["Order", refund.orderId, true], ["Requested by", refund.requesterName], ["Requester ID", refund.requesterUsername, true], ["Reason", reasons[refund.reason] || refund.reason], ["Requested at", date(refund.requestedAt, true)]])}</div>
+      ${refund.notes ? `<div class="notes-block"><h3>Request notes</h3><p>${escape(refund.notes)}</p></div>` : ""}
+      <div id="decision-error" class="error-message" role="alert" ${ownRequest ? "" : "hidden"}>${ownRequest ? "You requested this refund, so another approver must decide it." : ""}</div>
+      <div class="field"><label for="decision-notes">Decision notes <span>· optional</span></label><textarea id="decision-notes" maxlength="500" rows="3" placeholder="Add review context…"></textarea></div>${actorLine()}</div>
+      <div class="dialog-footer"><button class="btn" data-action="dialog-close">Cancel</button><button class="btn danger" data-action="approval-decide" data-decision="reject" data-id="${escape(refund.id)}" ${ownRequest ? "disabled" : ""}>Reject</button><button class="btn primary" data-action="approval-decide" data-decision="approve" data-id="${escape(refund.id)}" ${ownRequest ? "disabled" : ""}>Approve &amp; send</button></div>`);
+  }
+
+  async function decideApproval(refundId, decision) {
+    if (state.busy) return;
+    state.busy = true;
+    dialog.querySelectorAll("button, textarea").forEach(element => { element.disabled = true; });
+    const notes = $("#decision-notes")?.value || "";
+    try {
+      const result = await api(`/api/refunds/${encodeURIComponent(refundId)}/${decision}`, {
+        method: "POST", headers: { ...csrfHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ notes })
+      });
+      await refreshDashboard();
+      state.busy = false;
+      closeDialog();
+      renderApp();
+      if (decision === "approve") renderReceipt(result);
+      else toast(`Refund ${refundId} rejected. No payment instruction was sent.`);
+    } catch (error) {
+      if (error.status === 401) return;
+      state.busy = false;
+      const target = $("#decision-error");
+      if (target) { target.textContent = error.message; target.hidden = false; }
+      dialog.querySelectorAll("button, textarea").forEach(element => { element.disabled = false; });
     } finally { state.busy = false; }
   }
 
@@ -749,6 +839,8 @@
     }
     else if (action === "refund-back" && !state.pending?.attempted) renderCompose();
     else if (action === "send-refund") void sendRefund();
+    else if (action === "approval-review") reviewApproval(button.dataset.id);
+    else if (action === "approval-decide") void decideApproval(button.dataset.id, button.dataset.decision);
     else if (action === "payment") showPayment(button.dataset.id);
     else if (action === "order-payment" || action === "refund-payment") {
       const payment = state.data.payments.find(item => action === "order-payment" ? item.orderId === button.dataset.id : item.refundId === button.dataset.id);

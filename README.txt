@@ -1,13 +1,13 @@
-REFUNDOPS - LEGACY REFUND DEMONSTRATION
-=====================================
+REFUNDOPS - HIGH-VALUE APPROVAL CANDIDATE
+=========================================
 
 Purpose
 -------
 A local, synthetic refund-operations application for an agentic software
-engineering demonstration. This is the BEFORE state: every valid full-order
-refund is immediately sent to a mock payment provider, regardless of value.
-There is no approval workflow, no production payment connection and no AI model
-embedded in the application.
+engineering demonstration. Refunds of INR 10,000 or less are sent immediately
+to a mock payment provider. Refunds above INR 10,000 wait for an independent
+approver, and rejection sends no payment instruction. There is no production
+payment connection and no AI model embedded in the application.
 
 The browser interface is deliberately polished while the backend targets
 Java 11 and Spring Boot 2.7.18. Spring Boot 2.7 is an intentionally outdated
@@ -26,7 +26,7 @@ From this directory in PowerShell:
 The launcher builds the application and prints two newly generated local
 demo passwords. Open:
 
-    http://127.0.0.1:8080
+    http://127.0.0.1:8081
 
 To reuse an existing build:
 
@@ -34,7 +34,11 @@ To reuse an existing build:
 
 To use a different local port:
 
-    .\Start-Demo.ps1 -Port 8081
+    .\Start-Demo.ps1 -Port 8082
+
+The candidate defaults to port 8081 and uses the
+REFUNDOPS_APPROVAL_SESSION cookie name, so it can run beside the unchanged
+legacy baseline on port 8080 without sharing application data or login state.
 
 If your organisation restricts script execution, follow its approved policy.
 Do not change machine-wide execution policy for this demo. A manual alternative
@@ -46,9 +50,10 @@ Users and credentials
 dahnesh -> Dahnesh -> Requestor + Approver
 shweta  -> Shweta  -> Requestor
 
-Both users can request refunds. The Approver role is assigned server-side but
-has no approval action in this legacy version. Selecting a user on the login
-screen does not authenticate them; their password is still required.
+Both users can request refunds. Dahnesh can approve or reject high-value
+requests made by Shweta. Dahnesh cannot decide his own requests, even though he
+also has the Approver role. Selecting a user on the login screen does not
+authenticate them; their password is still required.
 
 Optionally set these environment variables before launching to supply your own
 local demo passwords:
@@ -63,15 +68,16 @@ HTTP is acceptable here only because this is a loopback-only local demo.
 Suggested on-screen walkthrough
 -------------------------------
 1. Sign in as Dahnesh; point out the identity and both application roles.
-2. Browse the synthetic orders and request a low-value full-order refund.
-3. Show the resulting "Sent to provider" receipt and payment ledger entry.
-4. Request a high-value refund. It takes the SAME immediate processing path.
-5. Show that no independent approval was requested.
-6. Sign out and sign in as Shweta; demonstrate the Requestor-only identity.
-7. Use the activity view to show server-recorded actors and payment events.
+2. Request the INR 2,500 or INR 10,000 full-order refund and show its immediate
+   payment receipt.
+3. Sign in as Shweta and request the INR 25,000 order. Show the pending result
+   and confirm that the payment ledger is unchanged.
+4. Sign in as Dahnesh, open Approvals, and approve Shweta's request. Show the
+   new payment and both identities in the decision history.
+5. Reset, request the INR 25,000 order as Dahnesh, and show that self-approval
+   is blocked.
+6. Repeat with rejection and show that no payment instruction is created.
 
-Amounts above INR 10,000 can be highlighted for the presenter, but that is
-informational only. It does not represent an implemented approval threshold.
 "Sent to provider" means a mock payment instruction was recorded; it does not
 mean a real settlement occurred.
 
@@ -92,11 +98,14 @@ Implementation boundaries
 --------------------------
 - Spring MVC REST endpoints and a same-origin HTML/CSS/JavaScript interface.
 - No CDN, external fonts, analytics or third-party runtime assets.
-- Full-order refunds only; one refund per eligible order.
+- Full-order refunds only; one refund decision per eligible order.
 - Amounts and requester identity come from the server.
 - Repeated identical submissions with one idempotency key reuse the original
   result; conflicting requests do not send a second payment.
-- Atomic in-memory processing prevents concurrent duplicate sends.
+- Amounts above INR 10,000 enter PENDING_APPROVAL without a payment.
+- Only an authenticated Approver other than the requester may decide a pending
+  refund. Approval sends one payment; rejection sends none.
+- Atomic in-memory processing prevents concurrent duplicate decisions and sends.
 - Mock provider records are application evidence, not tamper-proof audit logs.
 - The frontend does not substitute fabricated data if an API request fails.
 - Customer-facing screens use business wording ("Payment gateway", "Automatic
@@ -116,8 +125,7 @@ Build
 -----
     mvn clean verify
 
-Future stages intentionally not implemented
-------------------------------------------
-High-value approval rules, an approval queue, independent-approver enforcement,
-modernisation, pull-request automation, release gates and GitHub publishing are
-separate steps. This repository contains only the legacy baseline.
+Still intentionally not implemented
+-----------------------------------
+Persistence, production payment connectivity, modernisation, release gates and
+AI-assisted decisions remain outside this local demonstration.

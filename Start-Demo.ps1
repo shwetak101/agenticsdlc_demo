@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
-    [int]$Port = 8080,
+    [int]$Port = 8081,
     [switch]$SkipBuild
 )
 
@@ -41,7 +41,7 @@ try {
     }
 
     Write-Host ''
-    Write-Host 'RefundOps | Legacy baseline | Local mock payments only'
+    Write-Host 'RefundOps | High-value approval candidate | Local mock payments only'
     Write-Host "Open http://127.0.0.1:$Port"
     Write-Host ''
     Write-Host 'Local demo sign-in (passwords are not stored in source):'
