@@ -16,18 +16,26 @@ public final class RefundModels {
         public final String mode = "THRESHOLD_APPROVAL";
         public final String provider = "MockPay";
         public final String storage = "In-memory";
-        public final BigDecimal approvalThreshold = new BigDecimal("10000");
+        public final BigDecimal approvalThreshold;
+        public final String policyVersion;
+
+        public Application(ApprovalPolicy policy) {
+            this.approvalThreshold = policy.approvalThreshold;
+            this.policyVersion = policy.policyVersion;
+        }
     }
 
     public static final class Dashboard {
-        public final Application application = new Application();
+        public final Application application;
         public final List<Order> orders;
         public final List<Refund> refunds;
         public final List<Payment> payments;
         public final List<Event> events;
         public final List<Refund> approvalQueue;
 
-        public Dashboard(List<Order> orders, List<Refund> refunds, List<Payment> payments, List<Event> events) {
+        public Dashboard(ApprovalPolicy policy, List<Order> orders, List<Refund> refunds,
+                         List<Payment> payments, List<Event> events) {
+            this.application = new Application(policy);
             this.orders = List.copyOf(orders);
             this.refunds = List.copyOf(refunds);
             this.payments = List.copyOf(payments);
@@ -99,10 +107,12 @@ public final class RefundModels {
         public final String decidedByName;
         public final Instant decidedAt;
         public final String decisionNotes;
+        public final BigDecimal approvalThreshold;
+        public final String policyVersion;
 
         public Refund(String id, Order order, DemoUsers.User requester, String reason, String notes,
                       String status, Instant requestedAt, String paymentId, DemoUsers.User decidedBy,
-                      Instant decidedAt, String decisionNotes) {
+                      Instant decidedAt, String decisionNotes, ApprovalPolicy policy) {
             this.id = id;
             this.orderId = order.id;
             this.customerName = order.customerName;
@@ -118,6 +128,8 @@ public final class RefundModels {
             this.decidedByName = decidedBy == null ? null : decidedBy.displayName;
             this.decidedAt = decidedAt;
             this.decisionNotes = decisionNotes;
+            this.approvalThreshold = policy.approvalThreshold;
+            this.policyVersion = policy.policyVersion;
         }
 
         public Refund decide(String status, String paymentId, DemoUsers.User decidedBy,
@@ -142,6 +154,8 @@ public final class RefundModels {
             this.decidedByName = decidedBy.displayName;
             this.decidedAt = decidedAt;
             this.decisionNotes = decisionNotes;
+            this.approvalThreshold = original.approvalThreshold;
+            this.policyVersion = original.policyVersion;
         }
     }
 

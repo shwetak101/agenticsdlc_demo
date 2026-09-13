@@ -11,6 +11,7 @@ import java.util.UUID;
 import javax.validation.ConstraintViolation;
 import javax.validation.ConstraintViolationException;
 import javax.validation.Validator;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import com.refundops.RefundModels.Dashboard;
@@ -22,7 +23,6 @@ import com.refundops.RefundModels.RefundResult;
 
 @Service
 public class RefundService {
-    private static final BigDecimal APPROVAL_THRESHOLD = new BigDecimal("10000");
     private final Map<String, Order> orders = new LinkedHashMap<>();
     private final List<Refund> refunds = new ArrayList<>();
     private final List<Payment> payments = new ArrayList<>();
@@ -30,18 +30,25 @@ public class RefundService {
     private final Map<String, Submission> submissions = new LinkedHashMap<>();
     private final MockPayProvider provider;
     private final Validator validator;
+    private final ApprovalPolicy approvalPolicy;
     private int refundSequence;
     private int paymentSequence;
     private int eventSequence;
 
     public RefundService(MockPayProvider provider, Validator validator) {
+        this(provider, validator, ApprovalPolicy.defaults());
+    }
+
+    @Autowired
+    public RefundService(MockPayProvider provider, Validator validator, ApprovalPolicy approvalPolicy) {
         this.provider = provider;
         this.validator = validator;
+        this.approvalPolicy = approvalPolicy;
         reset();
     }
 
     public synchronized Dashboard dashboard() {
-        return new Dashboard(new ArrayList<>(orders.values()), refunds, payments, events);
+        return new Dashboard(approvalPolicy, new ArrayList<>(orders.values()), refunds, payments, events);
     }
 
     public synchronized RefundResult create(String username, RefundRequest request) {
@@ -73,9 +80,9 @@ public class RefundService {
         refundSequence++;
         Refund refund;
         Payment payment;
-        if (order.amount.compareTo(APPROVAL_THRESHOLD) > 0) {
+        if (approvalPolicy.requiresApproval(order.amount)) {
             refund = new Refund(refundId, order, requester, request.reason.name(), notes,
-                    "PENDING_APPROVAL", now, null, null, null, "");
+                    "PENDING_APPROVAL", now, null, null, null, "", approvalPolicy);
             payment = null;
             orders.put(order.id, order.refundPending());
             events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_PENDING_APPROVAL",
@@ -85,7 +92,7 @@ public class RefundService {
         } else {
             String paymentId = "PAY-" + (paymentSequence + 1);
             refund = new Refund(refundId, order, requester, request.reason.name(), notes,
-                    "SENT_TO_PROVIDER", now, paymentId, null, null, "");
+                    "SENT_TO_PROVIDER", now, paymentId, null, null, "", approvalPolicy);
             payment = provider.send(paymentId, refund, now);
             paymentSequence++;
             orders.put(order.id, order.refundSent());
@@ -236,7 +243,8 @@ public class RefundService {
                 "Electronics", "22990", "2026-09-06T13:40:00Z", "Net Banking");
         events.add(new Event("EVT-" + (++eventSequence), Instant.parse("2026-09-07T08:00:00Z"),
                 "CANDIDATE_READY", "Approval candidate ready",
-                "12 synthetic orders loaded. Refunds above INR 10,000 require independent approval.",
+                "12 synthetic orders loaded. Refunds above INR " + approvalPolicy.approvalThreshold.toPlainString()
+                        + " require independent approval (policy " + approvalPolicy.policyVersion + ").",
                 "System", null));
         return dashboard();
     }

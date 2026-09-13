@@ -31,6 +31,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "REFUNDS_DAHNESH_PASSWORD=test-only-dahnesh-password",
         "REFUNDS_SHWETA_PASSWORD=test-only-shweta-password",
+        "refunds.approval.threshold=10000",
+        "refunds.approval.version=refund-policy-v1",
         "spring.main.banner-mode=off",
         "logging.level.root=WARN"
 })
@@ -177,7 +179,8 @@ class RefundApiIntegrationTest {
         assertThat(dashboard.get("application")).isEqualTo(mapper.readTree(
                 "{\"name\":\"RefundOps\",\"version\":\"High-value approval candidate\",\"javaBaseline\":\"11\","
                         + "\"springBootVersion\":\"2.7.18\",\"mode\":\"THRESHOLD_APPROVAL\","
-                        + "\"provider\":\"MockPay\",\"storage\":\"In-memory\",\"approvalThreshold\":10000}"));
+                        + "\"provider\":\"MockPay\",\"storage\":\"In-memory\",\"approvalThreshold\":10000,"
+                        + "\"policyVersion\":\"refund-policy-v1\"}"));
         for (JsonNode order : dashboard.get("orders")) {
             assertThat(order.size()).isEqualTo(11);
             assertThat(order.get("status").asText()).isEqualTo("PAID");
@@ -199,7 +202,8 @@ class RefundApiIntegrationTest {
         Session auth = login(username);
         ObjectNode request = payload(orderId);
         request.put("amount", -500).put("requesterUsername", "attacker").put("requesterName", "Forged")
-                .put("actorDisplayName", "Forged").put("status", "APPROVED");
+                .put("actorDisplayName", "Forged").put("status", "APPROVED")
+                .put("approvalThreshold", 0).put("policyVersion", "forged-policy");
         JsonNode result = json(mvc.perform(refund(auth, request))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.replayed").value(false))
@@ -207,6 +211,8 @@ class RefundApiIntegrationTest {
                 .andExpect(jsonPath("$.refund.orderId").value(orderId))
                 .andExpect(jsonPath("$.refund.amount").value(amount))
                 .andExpect(jsonPath("$.refund.status").value("SENT_TO_PROVIDER"))
+                .andExpect(jsonPath("$.refund.approvalThreshold").value(10000))
+                .andExpect(jsonPath("$.refund.policyVersion").value("refund-policy-v1"))
                 .andExpect(jsonPath("$.refund.requesterUsername").value(username))
                 .andExpect(jsonPath("$.refund.requesterName").value(DemoUsers.get(username).displayName))
                 .andExpect(jsonPath("$.payment.id").value("PAY-3001"))
@@ -215,7 +221,7 @@ class RefundApiIntegrationTest {
                 .andExpect(jsonPath("$.payment.provider").value("MockPay"))
                 .andExpect(jsonPath("$.payment.requesterName").value(DemoUsers.get(username).displayName))
                 .andReturn());
-        assertThat(result.get("refund").size()).isEqualTo(16);
+        assertThat(result.get("refund").size()).isEqualTo(18);
         assertThat(result.get("payment").size()).isEqualTo(9);
         assertThat(result.at("/refund/paymentId")).isEqualTo(result.at("/payment/id"));
         assertThat(result.at("/payment/refundId")).isEqualTo(result.at("/refund/id"));
@@ -233,6 +239,8 @@ class RefundApiIntegrationTest {
         JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.refund.status").value("PENDING_APPROVAL"))
+                .andExpect(jsonPath("$.refund.approvalThreshold").value(10000))
+                .andExpect(jsonPath("$.refund.policyVersion").value("refund-policy-v1"))
                 .andExpect(jsonPath("$.refund.requesterUsername").value("shweta"))
                 .andExpect(jsonPath("$.payment").value(nullValue()))
                 .andReturn());
@@ -247,6 +255,9 @@ class RefundApiIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.refund.status").value("SENT_TO_PROVIDER"))
                 .andExpect(jsonPath("$.refund.decidedByUsername").value("dahnesh"))
+                .andExpect(jsonPath("$.refund.approvalThreshold").value(10000))
+                .andExpect(jsonPath("$.refund.policyVersion").value("refund-policy-v1"))
+                .andExpect(jsonPath("$.refund.decisionNotes").value("Independent review"))
                 .andExpect(jsonPath("$.payment.id").value("PAY-3001"));
         mvc.perform(decision(dahnesh, refundId, "approve"))
                 .andExpect(status().isOk())

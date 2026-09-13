@@ -13,7 +13,11 @@ import javax.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
+import org.springframework.test.util.ReflectionTestUtils;
 import com.refundops.RefundModels.Dashboard;
 import com.refundops.RefundModels.RefundResult;
 
@@ -153,6 +157,8 @@ class RefundServiceTest {
         RefundResult pending = service.create("shweta", request(key, "ORD-1044"));
         assertThat(pending.refund.status).isEqualTo("PENDING_APPROVAL");
         assertThat(pending.payment).isNull();
+        assertThat(pending.refund.approvalThreshold).isEqualByComparingTo("10000");
+        assertThat(pending.refund.policyVersion).isEqualTo("refund-policy-v1");
         assertThat(service.dashboard().approvalQueue).containsExactly(pending.refund);
         assertThat(service.dashboard().payments).isEmpty();
         verify(provider, times(0)).send(anyString(), any(), any());
@@ -167,6 +173,106 @@ class RefundServiceTest {
         assertThat(replay.replayed).isTrue();
         assertThat(replay.refund.status).isEqualTo("SENT_TO_PROVIDER");
         assertThat(replay.payment.id).isEqualTo("PAY-3001");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"2499.99,PENDING_APPROVAL", "2500,SENT_TO_PROVIDER", "2500.01,SENT_TO_PROVIDER",
+            "0,PENDING_APPROVAL"})
+    void configuredThresholdControlsCreation(String threshold, String status) {
+        service = new RefundService(provider, factory.getValidator(), new ApprovalPolicy(threshold, "custom-v2"));
+        RefundResult result = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1046"));
+        assertThat(result.refund.status).isEqualTo(status);
+        assertThat(result.refund.approvalThreshold).isEqualByComparingTo(threshold);
+        assertThat(result.refund.policyVersion).isEqualTo("custom-v2");
+        assertThat(service.dashboard().application.approvalThreshold).isEqualByComparingTo(threshold);
+        assertThat(service.dashboard().application.policyVersion).isEqualTo("custom-v2");
+        verify(provider, times("PENDING_APPROVAL".equals(status) ? 0 : 1)).send(anyString(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"approve", "reject"})
+    void frozenPolicyAndNotesSurviveDecisionsSnapshotsAndReplaysWithoutReclassification(String action) {
+        service = new RefundService(provider, factory.getValidator(),
+                new ApprovalPolicy("2499.99", "creation-v2"));
+        RefundRequest originalRequest = request(UUID.randomUUID().toString(), "ORD-1046");
+        RefundRequest automaticRequest = request(UUID.randomUUID().toString(), "ORD-1047");
+        RefundResult pending = service.create("shweta", originalRequest);
+        RefundResult automatic = service.create("shweta", automaticRequest);
+        Dashboard before = service.dashboard();
+
+        // Simulate a future policy replacement without adding a production hot-reload/reset path.
+        ReflectionTestUtils.setField(service, "approvalPolicy", new ApprovalPolicy("100000", "later-v3"));
+        assertThat(service.dashboard().refunds).hasSize(2);
+        assertThat(service.dashboard().payments).hasSize(1);
+        assertThat(service.dashboard().approvalQueue).containsExactly(pending.refund);
+        RefundResult stillPending = service.create("shweta", originalRequest);
+        assertThat(stillPending.replayed).isTrue();
+        assertThat(stillPending.refund).isSameAs(pending.refund);
+        assertThat(stillPending.payment).isNull();
+
+        RefundResult newRefund = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        assertThat(newRefund.refund.status).isEqualTo("SENT_TO_PROVIDER");
+        assertThat(newRefund.refund.policyVersion).isEqualTo("later-v3");
+        assertThat(newRefund.refund.approvalThreshold).isEqualByComparingTo("100000");
+        assertThat(before.application.policyVersion).isEqualTo("creation-v2");
+        assertThat(before.application.approvalThreshold).isEqualByComparingTo("2499.99");
+
+        ApprovalDecisionRequest decision = decision("Independent " + action + " notes");
+        RefundResult decided = "approve".equals(action)
+                ? service.approve("dahnesh", pending.refund.id, decision)
+                : service.reject("dahnesh", pending.refund.id, decision);
+        assertThat(decided.refund.status).isEqualTo("approve".equals(action) ? "SENT_TO_PROVIDER" : "REJECTED");
+        assertThat(decided.refund.policyVersion).isEqualTo("creation-v2");
+        assertThat(decided.refund.approvalThreshold).isEqualByComparingTo("2499.99");
+        assertThat(decided.refund.requestedAt).isEqualTo(pending.refund.requestedAt);
+        assertThat(decided.refund.notes).isEqualTo(originalRequest.notes);
+        assertThat(decided.refund.reason).isEqualTo(pending.refund.reason);
+        assertThat(decided.refund.requesterUsername).isEqualTo("shweta");
+        assertThat(decided.refund.decidedByUsername).isEqualTo("dahnesh");
+        assertThat(decided.refund.decidedAt).isNotNull();
+        assertThat(decided.refund.decisionNotes).isEqualTo("Independent " + action + " notes");
+        assertThat(before.approvalQueue).containsExactly(pending.refund);
+        assertThat(pending.refund.status).isEqualTo("PENDING_APPROVAL");
+        assertThat(pending.refund.decidedAt).isNull();
+        assertThat(pending.refund.decidedByUsername).isNull();
+        assertThat(pending.refund.decisionNotes).isEmpty();
+        assertThat(service.dashboard().approvalQueue).isEmpty();
+        assertThat(service.dashboard().refunds).contains(decided.refund);
+
+        ReflectionTestUtils.setField(service, "approvalPolicy", new ApprovalPolicy("0", "later-v4"));
+        RefundResult automaticReplay = service.create("shweta", automaticRequest);
+        assertThat(automaticReplay.replayed).isTrue();
+        assertThat(automaticReplay.refund).isSameAs(automatic.refund);
+        assertThat(automaticReplay.refund.policyVersion).isEqualTo("creation-v2");
+        assertThat(automaticReplay.refund.approvalThreshold).isEqualByComparingTo("2499.99");
+        assertThat(automaticReplay.payment).isSameAs(automatic.payment);
+        RefundResult creationReplay = service.create("shweta", originalRequest);
+        assertThat(creationReplay.replayed).isTrue();
+        assertThat(creationReplay.refund).isSameAs(decided.refund);
+        assertThat(creationReplay.payment).isSameAs(decided.payment);
+        RefundResult decisionReplay = "approve".equals(action)
+                ? service.approve("dahnesh", pending.refund.id, decision("Must not replace notes"))
+                : service.reject("dahnesh", pending.refund.id, decision("Must not replace notes"));
+        assertThat(decisionReplay.replayed).isTrue();
+        assertThat(decisionReplay.refund).isSameAs(decided.refund);
+        assertThat(decisionReplay.payment).isSameAs(decided.payment);
+        if ("reject".equals(action)) {
+            assertThat(decided.payment).isNull();
+        }
+        verify(provider, times("approve".equals(action) ? 3 : 2)).send(anyString(), any(), any());
+    }
+
+    @Test
+    void explicitResetRetainsConfiguredPolicy() {
+        service = new RefundService(provider, factory.getValidator(), new ApprovalPolicy("25000.50", "custom-v2"));
+        service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        Dashboard reset = service.reset();
+        assertThat(reset.refunds).isEmpty();
+        assertThat(reset.payments).isEmpty();
+        assertThat(reset.orders).hasSize(12);
+        assertThat(reset.application.approvalThreshold).isEqualByComparingTo("25000.50");
+        assertThat(reset.application.policyVersion).isEqualTo("custom-v2");
+        assertThat(reset.events.get(0).detail).contains("INR 25000.50", "custom-v2").doesNotContain("10,000");
     }
 
     @Test
