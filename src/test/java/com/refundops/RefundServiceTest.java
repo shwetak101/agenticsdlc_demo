@@ -13,6 +13,9 @@ import javax.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 import com.refundops.RefundModels.Dashboard;
 import com.refundops.RefundModels.RefundResult;
@@ -209,19 +212,64 @@ class RefundServiceTest {
     }
 
     @Test
-    void missingCredentialsFailWithActionableMessagesAndPasswordsAreBcrypt() {
+    void auditorCannotSubmitOrDecideRefundsThroughService() {
+        RefundResult pending = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        Dashboard before = service.dashboard();
+        assertThatThrownBy(() -> service.create("auditor", request(UUID.randomUUID().toString(), "ORD-1046")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("REQUESTOR_REQUIRED");
+        assertThatThrownBy(() -> service.approve("auditor", pending.refund.id, decision("")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("APPROVER_REQUIRED");
+        assertThatThrownBy(() -> service.reject("auditor", pending.refund.id, decision("")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("APPROVER_REQUIRED");
+        assertThatThrownBy(() -> service.reset("auditor"))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("DEMO_OPERATOR_REQUIRED");
+        assertThatThrownBy(() -> service.reset("shweta"))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("DEMO_OPERATOR_REQUIRED");
+        assertThat(service.dashboard()).usingRecursiveComparison().isEqualTo(before);
+        verify(provider, times(0)).send(anyString(), any(), any());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "\t"})
+    void missingCredentialsFailWithActionableMessages(String missingPassword) {
         SecurityConfig config = new SecurityConfig();
-        assertThatThrownBy(() -> config.userDetailsService("", "test-only-shweta", config.passwordEncoder()))
+        assertThatThrownBy(() -> config.userDetailsService(missingPassword, "test-only-shweta",
+                "test-only-auditor", config.passwordEncoder()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Set the REFUNDS_DAHNESH_PASSWORD environment variable");
-        assertThatThrownBy(() -> config.userDetailsService("test-only-dahnesh", " ", config.passwordEncoder()))
+        assertThatThrownBy(() -> config.userDetailsService("test-only-dahnesh", missingPassword,
+                "test-only-auditor", config.passwordEncoder()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Set the REFUNDS_SHWETA_PASSWORD environment variable");
+        assertThatThrownBy(() -> config.userDetailsService("test-only-dahnesh", "test-only-shweta",
+                missingPassword, config.passwordEncoder()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Set the REFUNDS_AUDITOR_PASSWORD environment variable");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"dahnesh", "shweta", "auditor"})
+    void passwordsAreBcryptAndAuthoritiesMatchSessionRoles(String username) {
+        SecurityConfig config = new SecurityConfig();
         org.springframework.security.core.userdetails.UserDetailsService users = config.userDetailsService(
-                "test-only-dahnesh", "test-only-shweta", config.passwordEncoder());
-        assertThat(users.loadUserByUsername("dahnesh").getPassword()).startsWith("$2a$");
-        assertThat(config.passwordEncoder().matches("test-only-shweta",
-                users.loadUserByUsername("shweta").getPassword())).isTrue();
+                "test-only-dahnesh", "test-only-shweta", "test-only-auditor", config.passwordEncoder());
+        org.springframework.security.core.userdetails.UserDetails user = users.loadUserByUsername(username);
+        assertThat(user.getPassword()).startsWith("$2a$").isNotEqualTo("test-only-" + username);
+        assertThat(config.passwordEncoder().matches("test-only-" + username, user.getPassword())).isTrue();
+        assertThat(user.getAuthorities()).extracting(authority -> authority.getAuthority())
+                .containsExactlyInAnyOrderElementsOf(DemoUsers.get(username).roles.stream()
+                        .map(role -> "ROLE_" + role).collect(java.util.stream.Collectors.toList()));
     }
 
     private RefundRequest request(String key, String orderId) {
