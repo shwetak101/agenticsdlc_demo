@@ -1,6 +1,12 @@
 REFUNDOPS - LEGACY REFUND DEMONSTRATION
 =====================================
 
+Private Codespaces comparison
+-----------------------------
+For the fixed before/after runtime, browser startup, private forwarded ports
+and safe lifecycle commands, see docs/codespaces.txt. The application source
+in this branch remains the legacy baseline.
+
 Purpose
 -------
 A local, synthetic refund-operations application for an agentic software

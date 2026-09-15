@@ -1,0 +1,4 @@
+.devcontainer/*.json text eol=lf
+.devcontainer/Dockerfile text eol=lf
+.devcontainer/**/*.sh text eol=lf
+.devcontainer/**/*.py text eol=lf

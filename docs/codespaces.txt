@@ -1,0 +1,151 @@
+REFUNDOPS: PRIVATE CODESPACES BEFORE / AFTER
+==========================================
+
+This configuration runs the real applications, not placeholder pages:
+
+  Before: fb497a78441bfe9d112415ceaf20e3328b6fe09f
+          port 8080; cookie JSESSIONID; immediate mocked refunds
+  After:  2dbef84d5c937d447a97492b9565ec0df36c9b41
+          port 8081; cookie REFUNDOPS_APPROVAL_SESSION; approval workflow
+
+Both are intentionally old Spring Boot 2.7 applications targeting Java 11.
+Only synthetic orders and mocked payments are permitted. No real customers,
+payment connections, telemetry dashboard or externally hosted assets are used.
+Separate processes isolate in-memory data and separate cookies isolate logins.
+
+Create and open (browser only)
+------------------------------
+Use the agenticsdlc_demo repository and the approved Codespaces configuration
+branch/ref. Its primary clone must be /workspaces/agenticsdlc_demo.
+
+The operator creates ONE Codespace on the approved four-core / 16-GB machine
+and sets its idle timeout to 30 minutes. The configuration asks for a minimum
+four CPUs and 8 GB; this is not a machine purchase or an idle-timeout setting.
+The operator must separately set/verify the timeout and machine selection.
+Do not create additional Codespaces for each application or profile.
+
+1. Open that Codespace in the browser. Allow container creation and lifecycle
+   commands to complete. First startup downloads dependencies and runs both
+   applications' existing Maven tests, serially.
+2. Open the Ports panel in the browser editor (View -> Open View -> Ports).
+3. Confirm ONLY 8080 (Before) and 8081 (After) are forwarded, both PRIVATE.
+   GitHub's forwarding default is private. devcontainer.json does not enforce
+   visibility; the operator must verify it. Never switch to Public or to
+   organisation-wide visibility for this demo.
+4. Use Open in Browser / the forwarded address on each row. Do not type
+   http://localhost:8080 in your own machine's browser: that is not the remote
+   Codespace. GitHub's forwarded HTTPS links retain private GitHub access
+   control. The apps themselves continue binding only to 127.0.0.1.
+5. Sign in separately in each tab. Public, synthetic-demo-only defaults are:
+       shweta / shweta    (Requestor)
+       dahnesh / dahnesh  (Requestor + Approver)
+   Selecting a user is not authentication; submit the password.
+6. Before submits every valid refund directly to the mocked provider. After
+   routes high-value refunds through approval; request as Shweta and review as
+   Dahnesh. Nothing sends real money.
+
+No terminal must stay open. postCreateCommand prepares/builds; postStartCommand
+starts or verifies both applications after each Codespace start. The launcher
+uses nohup, a new process session, closed inherited file descriptors, detached
+stdin and per-app logs. Resume reuses verified builds but not stale PIDs.
+Stopping a Codespace stops its applications. Restarting clears in-memory demo
+state. Background processes can affect idle detection: explicitly stop the
+Codespace in GitHub when done rather than relying only on a 30-minute timeout.
+Compute and retained storage may incur GitHub charges under your account's
+plan. No free-cost promise is implied; monitor usage and delete when finished.
+
+Isolation and preservation
+--------------------------
+The main clone's branch, tracked files and user edits are never reset, cleaned
+or checked out by the runtime. Git registers two DETACHED worktrees:
+
+  /workspaces/.refundops-runtime/before
+  /workspaces/.refundops-runtime/after
+
+Missing immutable commits are fetched by their full SHA from origin. Fetch
+requires normal repository access and network connectivity. No moving branch
+name selects the application code. Worktree identity, shared Git directory,
+detached HEAD, exact SHA and clean tracked/untracked state are checked before
+building or starting. Edited or wrong worktrees are refused, never repaired
+destructively. Resolve your own changes manually before retrying.
+
+Runtime ownership metadata, logs, build digests, a lifecycle lock and PID
+records live outside both source worktrees:
+
+  /workspaces/.refundops-runtime/owner.json
+  /workspaces/.refundops-runtime/state/
+
+The runtime root contains a .gitignore excluding /state/. Existing unknown
+roots, wrong-clone ownership and symlinked managed paths are refused. JAR
+digests prevent reuse of changed artifacts. PID identity includes Linux start
+time and the exact Java command/JAR path, port, cookie and role. Stop uses a
+Linux pidfd after rechecking identity, so a reused PID is not signalled.
+There is no kill-by-name, kill-by-port, forced kill, git clean or git reset.
+
+Dependencies and manual lifecycle
+---------------------------------
+The Dockerfile supplies JDK 21 and Maven 3.9.9, plus Git, Bash, Python 3 standard
+library and util-linux flock. JDK 21 builds/runs the unchanged Java 11 target.
+No npm, Python test framework, database, Kubernetes or paid Azure resource is
+needed. Initial image/dependency downloads require network access. Both builds
+run mvn clean verify without skipping tests. A build failure stops startup.
+
+From the primary clone's terminal, if manual recovery is necessary:
+
+  bash .devcontainer/scripts/prepare.sh
+  bash .devcontainer/scripts/start.sh
+  bash .devcontainer/scripts/status.sh
+  bash .devcontainer/scripts/stop.sh
+
+Start is idempotent and serializes lifecycle operations. It checks port
+availability without killing existing listeners, verifies the app owns its
+listening socket, and waits for the real page and /api/session with the expected
+cookie and CSRF response. Each app has a 120-second readiness deadline.
+Failures return nonzero and stop only processes launched by that invocation.
+Previously healthy processes are left running. Stop allows 30 seconds for
+graceful shutdown; if it times out the PID record remains for inspection.
+
+Inspect state/before-build.log, state/after-build.log, state/before.log and
+state/after.log for failures. Launchers never echo credentials or pass them on
+the Java command line. Do not publish runtime logs or credential overrides.
+
+To deliberately rebuild, stop first:
+
+  bash .devcontainer/scripts/stop.sh
+  bash .devcontainer/scripts/prepare.sh --rebuild
+  bash .devcontainer/scripts/start.sh
+
+Optional environment overrides:
+
+  REFUNDS_DAHNESH_PASSWORD, REFUNDS_SHWETA_PASSWORD
+      Set as repository-scoped Codespaces secrets before creating/restarting
+      the Codespace, or export in the shell before manual start. Defaults apply
+      ONLY when absent; explicitly blank values fail. Do not reuse real account
+      passwords. Change credentials by stopping/restarting both applications.
+  REFUNDOPS_BEFORE_PORT, REFUNDOPS_AFTER_PORT
+      Distinct unprivileged ports; default 8080 and 8081. Stop before changing.
+      CLI arguments override the immutable application.properties ports,
+      always retaining loopback binding and distinct session-cookie names.
+      Codespaces forwards only the default two ports. Alternate ports are for
+      local validation; any extra forward must be deliberately kept PRIVATE.
+  REFUNDOPS_START_TIMEOUT
+      Integer 1..600 seconds, per app; default 120.
+  REFUNDOPS_REPO, REFUNDOPS_RUNTIME_ROOT
+      Linux validation overrides only: absolute, canonical paths, runtime root
+      outside the clone. Defaults are the /workspaces paths documented above.
+
+Validation
+----------
+Run lightweight standard-library checks from the primary clone:
+
+  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .devcontainer/tests -v
+
+The live tests are skipped by default. ONLY on a disposable Linux validation
+clone/runtime, opt in with REFUNDOPS_LIVE_TEST=1 and the same command. They start
+real apps, log in, check cookie isolation, idempotence, user-edit preservation,
+PID-reuse refusal and custom ports, and finally stop both processes. They reset
+demo data through process restarts and temporarily edit/restore test files;
+never run them during a walkthrough or against another user's runtime.
+
+Local Docker checks cannot prove GitHub port privacy, machine choice, timeout
+or browser forwarding. Verify these in the single authorised Codespace.

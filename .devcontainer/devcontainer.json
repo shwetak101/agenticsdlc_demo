@@ -1,0 +1,31 @@
+{
+  "name": "RefundOps private before / after",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/agenticsdlc_demo",
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb"
+  },
+  "forwardPorts": [8080, 8081],
+  "portsAttributes": {
+    "8080": {
+      "label": "Before",
+      "onAutoForward": "notify",
+      "requireLocalPort": true
+    },
+    "8081": {
+      "label": "After",
+      "onAutoForward": "notify",
+      "requireLocalPort": true
+    }
+  },
+  "otherPortsAttributes": {
+    "onAutoForward": "ignore"
+  },
+  "postCreateCommand": "bash /workspaces/agenticsdlc_demo/.devcontainer/scripts/prepare.sh",
+  "postStartCommand": "bash /workspaces/agenticsdlc_demo/.devcontainer/scripts/start.sh",
+  "waitFor": "postStartCommand"
+}
