@@ -8,11 +8,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import javax.validation.ConstraintViolationException;
 import javax.validation.Validation;
 import javax.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 import com.refundops.RefundModels.Dashboard;
 import com.refundops.RefundModels.RefundResult;
@@ -180,7 +184,104 @@ class RefundServiceTest {
                 .isInstanceOf(ApiException.class)
                 .extracting(error -> ((ApiException) error).getCode())
                 .isEqualTo("APPROVER_REQUIRED");
+        assertThatThrownBy(() -> service.reject("dahnesh", pending.refund.id, decision("")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("SELF_APPROVAL_FORBIDDEN");
         assertThat(service.dashboard().payments).isEmpty();
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "\t\r\n", " \t \n ", "\u2003", "\u00a0", "\u202f"})
+    void rejectionRequiresJustificationWithoutChangingPendingState(String notes) {
+        RefundRequest request = request(UUID.randomUUID().toString(), "ORD-1044");
+        RefundResult pending = service.create("shweta", request);
+        Dashboard before = service.dashboard();
+
+        assertThatThrownBy(() -> service.reject("dahnesh", pending.refund.id, decision(notes)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("REJECTION_JUSTIFICATION_REQUIRED");
+                    assertThat(error.getMessage()).isEqualTo("A rejection justification is required.");
+                });
+
+        Dashboard after = service.dashboard();
+        assertThat(after.refunds).containsExactlyElementsOf(before.refunds);
+        assertThat(after.orders).containsExactlyElementsOf(before.orders);
+        assertThat(after.events).containsExactlyElementsOf(before.events);
+        assertThat(after.approvalQueue).containsExactly(pending.refund);
+        assertThat(after.payments).isEmpty();
+        assertThat(service.create("shweta", request).refund).isSameAs(pending.refund);
+        verify(provider, times(0)).send(anyString(), any(), any());
+    }
+
+    @Test
+    void rejectionWithMissingDecisionRequestIsInvalid() {
+        RefundResult pending = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        assertThatThrownBy(() -> service.reject("dahnesh", pending.refund.id, null))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("REJECTION_JUSTIFICATION_REQUIRED");
+                });
+        assertThat(service.dashboard().approvalQueue).containsExactly(pending.refund);
+        verify(provider, times(0)).send(anyString(), any(), any());
+    }
+
+    @Test
+    void rejectionEnforcesDecisionNotesLimitWhenServiceIsCalledDirectly() {
+        RefundResult pending = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        assertThatThrownBy(() -> service.reject("dahnesh", pending.refund.id, decision("x".repeat(501))))
+                .isInstanceOf(ConstraintViolationException.class);
+        assertThat(service.dashboard().approvalQueue).containsExactly(pending.refund);
+        assertThat(service.dashboard().payments).isEmpty();
+        verify(provider, times(0)).send(anyString(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Return not received.", " \tReturn not received.\n "})
+    void rejectionRetainsJustificationAndReplaysWithoutSendingPayment(String notes) {
+        RefundRequest request = request(UUID.randomUUID().toString(), "ORD-1044");
+        RefundResult pending = service.create("shweta", request);
+        RefundResult rejected = service.reject("dahnesh", pending.refund.id, decision(notes));
+
+        assertThat(rejected.replayed).isFalse();
+        assertThat(rejected.refund.status).isEqualTo("REJECTED");
+        assertThat(rejected.refund.decisionNotes).isEqualTo(notes);
+        assertThat(rejected.refund.notes).isEqualTo(request.notes);
+        assertThat(rejected.refund.decidedByUsername).isEqualTo("dahnesh");
+        assertThat(rejected.refund.decidedAt).isNotNull();
+        assertThat(rejected.refund.paymentId).isNull();
+        assertThat(rejected.payment).isNull();
+        assertThat(service.dashboard().approvalQueue).isEmpty();
+        assertThat(order(service.dashboard(), "ORD-1044").status).isEqualTo("REFUND_REJECTED");
+        assertThat(service.dashboard().events.get(0).type).isEqualTo("REFUND_REJECTED");
+
+        RefundResult replay = service.reject("dahnesh", pending.refund.id, decision("Different review notes"));
+        assertThat(replay.replayed).isTrue();
+        assertThat(replay.refund).isSameAs(rejected.refund);
+        assertThat(service.create("shweta", request).refund).isSameAs(rejected.refund);
+        assertThatThrownBy(() -> service.reject("dahnesh", pending.refund.id, decision("")))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode()).isEqualTo("REJECTION_JUSTIFICATION_REQUIRED");
+                });
+        assertThat(service.dashboard().refunds).containsExactly(rejected.refund);
+        assertThat(service.dashboard().events).hasSize(3);
+        assertThat(service.dashboard().payments).isEmpty();
+        verify(provider, times(0)).send(anyString(), any(), any());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "\t\r\n"})
+    void approvalNotesRemainOptional(String notes) {
+        RefundResult pending = service.create("shweta", request(UUID.randomUUID().toString(), "ORD-1044"));
+        RefundResult approved = service.approve("dahnesh", pending.refund.id, decision(notes));
+        assertThat(approved.refund.status).isEqualTo("SENT_TO_PROVIDER");
+        assertThat(approved.refund.decisionNotes).isEqualTo(notes == null ? "" : notes);
+        assertThat(approved.payment.id).isEqualTo("PAY-3001");
+        verify(provider, times(1)).send(anyString(), any(), any());
     }
 
     @Test

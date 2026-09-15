@@ -637,15 +637,24 @@
       <div class="dialog-body"><div class="detail-card"><div class="detail-hero"><small>Refund amount · INR</small><strong>${money(refund.amount)}</strong>${status(refund.status)}</div>${detailList([["Order", refund.orderId, true], ["Requested by", refund.requesterName], ["Requester ID", refund.requesterUsername, true], ["Reason", reasons[refund.reason] || refund.reason], ["Requested at", date(refund.requestedAt, true)]])}</div>
       ${refund.notes ? `<div class="notes-block"><h3>Request notes</h3><p>${escape(refund.notes)}</p></div>` : ""}
       <div id="decision-error" class="error-message" role="alert" ${ownRequest ? "" : "hidden"}>${ownRequest ? "You requested this refund, so another approver must decide it." : ""}</div>
-      <div class="field"><label for="decision-notes">Decision notes <span>· optional</span></label><textarea id="decision-notes" maxlength="500" rows="3" placeholder="Add review context…"></textarea></div>${actorLine()}</div>
+      <div class="field"><label for="decision-notes">Decision notes <span>· optional for approval; required for rejection</span></label><textarea id="decision-notes" maxlength="500" rows="3" placeholder="Add review context…"></textarea></div>${actorLine()}</div>
       <div class="dialog-footer"><button class="btn" data-action="dialog-close">Cancel</button><button class="btn danger" data-action="approval-decide" data-decision="reject" data-id="${escape(refund.id)}" ${ownRequest ? "disabled" : ""}>Reject</button><button class="btn primary" data-action="approval-decide" data-decision="approve" data-id="${escape(refund.id)}" ${ownRequest ? "disabled" : ""}>Approve &amp; send</button></div>`);
   }
 
   async function decideApproval(refundId, decision) {
     if (state.busy) return;
+    const notesField = $("#decision-notes");
+    const notes = notesField?.value || "";
+    if (decision === "reject" && !notes.trim()) {
+      const target = $("#decision-error");
+      if (target) { target.textContent = "A rejection justification is required."; target.hidden = false; }
+      notesField?.setAttribute("aria-invalid", "true");
+      notesField?.focus();
+      announce("A rejection justification is required.");
+      return;
+    }
     state.busy = true;
     dialog.querySelectorAll("button, textarea").forEach(element => { element.disabled = true; });
-    const notes = $("#decision-notes")?.value || "";
     try {
       const result = await api(`/api/refunds/${encodeURIComponent(refundId)}/${decision}`, {
         method: "POST", headers: { ...csrfHeaders(), "Content-Type": "application/json" },
@@ -875,6 +884,10 @@
     else if (input.id === "refund-notes") {
       state.pending.notes = input.value;
       $("#notes-count").textContent = `${input.value.length} / 500 characters`;
+    } else if (input.id === "decision-notes") {
+      input.removeAttribute("aria-invalid");
+      const error = $("#decision-error");
+      if (error) error.hidden = true;
     } else if (input.id === "username") {
       document.querySelectorAll(".account-card").forEach(card => card.classList.toggle("selected", card.dataset.username === input.value.trim().toLowerCase()));
     }

@@ -112,7 +112,8 @@ Implementation boundaries
   result; conflicting requests do not send a second payment.
 - Amounts above INR 10,000 enter PENDING_APPROVAL without a payment.
 - Only an authenticated Approver other than the requester may decide a pending
-  refund. Approval sends one payment; rejection sends none.
+  refund. Approval notes are optional; rejection requires a nonblank
+  justification of at most 500 characters and sends no payment.
 - Atomic in-memory processing prevents concurrent duplicate decisions and sends.
 - Mock provider records are application evidence, not tamper-proof audit logs.
 - The frontend does not substitute fabricated data if an API request fails.
