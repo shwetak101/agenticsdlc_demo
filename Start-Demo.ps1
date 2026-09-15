@@ -33,27 +33,37 @@ try {
 
     $defaultDahnesh = [string]::IsNullOrWhiteSpace($env:REFUNDS_DAHNESH_PASSWORD)
     $defaultShweta = [string]::IsNullOrWhiteSpace($env:REFUNDS_SHWETA_PASSWORD)
+    $defaultAuditor = [string]::IsNullOrWhiteSpace($env:REFUNDS_AUDITOR_PASSWORD)
     if ($defaultDahnesh) {
         $env:REFUNDS_DAHNESH_PASSWORD = 'dahnesh'
     }
     if ($defaultShweta) {
         $env:REFUNDS_SHWETA_PASSWORD = 'shweta'
     }
+    if ($defaultAuditor) {
+        $env:REFUNDS_AUDITOR_PASSWORD = 'auditor'
+    }
 
     Write-Host ''
     Write-Host 'RefundOps | High-value approval candidate | Local mock payments only'
     Write-Host "Open http://127.0.0.1:$Port"
     Write-Host ''
-    Write-Host 'Public demo-only sign-ins. Never use these accounts for real data or production.'
+    Write-Host 'Demo-only accounts. Never use these accounts for real data or production.'
+    Write-Host 'Public local defaults are documented in README.txt. Passwords are not logged.'
     if ($defaultDahnesh) {
-        Write-Host "  dahnesh  /  $($env:REFUNDS_DAHNESH_PASSWORD)  [Requestor + Approver]"
+        Write-Host '  dahnesh  [Requestor + Approver + Demo operator]  - public local default'
     } else {
-        Write-Host '  dahnesh  /  password supplied by REFUNDS_DAHNESH_PASSWORD'
+        Write-Host '  dahnesh  [Requestor + Approver + Demo operator]  - REFUNDS_DAHNESH_PASSWORD override'
     }
     if ($defaultShweta) {
-        Write-Host "  shweta   /  $($env:REFUNDS_SHWETA_PASSWORD)  [Requestor]"
+        Write-Host '  shweta   [Requestor]  - public local default'
     } else {
-        Write-Host '  shweta   /  password supplied by REFUNDS_SHWETA_PASSWORD'
+        Write-Host '  shweta   [Requestor]  - REFUNDS_SHWETA_PASSWORD override'
+    }
+    if ($defaultAuditor) {
+        Write-Host '  auditor  [Auditor - read-only]  - public local default'
+    } else {
+        Write-Host '  auditor  [Auditor - read-only]  - REFUNDS_AUDITOR_PASSWORD override'
     }
     Write-Host ''
     Write-Host 'Stopping/restarting clears the in-memory demo data. Press Ctrl+C to stop.'
@@ -70,6 +80,9 @@ try {
     }
     if (Get-Variable defaultShweta -ErrorAction SilentlyContinue) {
         if ($defaultShweta) { Remove-Item Env:\REFUNDS_SHWETA_PASSWORD -ErrorAction SilentlyContinue }
+    }
+    if (Get-Variable defaultAuditor -ErrorAction SilentlyContinue) {
+        if ($defaultAuditor) { Remove-Item Env:\REFUNDS_AUDITOR_PASSWORD -ErrorAction SilentlyContinue }
     }
     Pop-Location
 }

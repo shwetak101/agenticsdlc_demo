@@ -65,7 +65,7 @@ public class RefundController {
     }
 
     @PostMapping("/demo/reset")
-    public RefundModels.Dashboard reset() {
-        return service.reset();
+    public RefundModels.Dashboard reset(Authentication authentication) {
+        return service.reset(authentication.getName());
     }
 }

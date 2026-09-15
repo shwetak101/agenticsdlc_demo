@@ -32,14 +32,18 @@ public class SecurityConfig {
     public UserDetailsService userDetailsService(
             @Value("${REFUNDS_DAHNESH_PASSWORD:}") String dahneshPassword,
             @Value("${REFUNDS_SHWETA_PASSWORD:}") String shwetaPassword,
+            @Value("${REFUNDS_AUDITOR_PASSWORD:}") String auditorPassword,
             PasswordEncoder encoder) {
         requirePassword("REFUNDS_DAHNESH_PASSWORD", dahneshPassword);
         requirePassword("REFUNDS_SHWETA_PASSWORD", shwetaPassword);
+        requirePassword("REFUNDS_AUDITOR_PASSWORD", auditorPassword);
         return new InMemoryUserDetailsManager(
                 User.withUsername("dahnesh").password(encoder.encode(dahneshPassword))
-                        .roles("REQUESTOR", "APPROVER").build(),
+                        .roles("REQUESTOR", "APPROVER", "DEMO_OPERATOR").build(),
                 User.withUsername("shweta").password(encoder.encode(shwetaPassword))
-                        .roles("REQUESTOR").build());
+                        .roles("REQUESTOR").build(),
+                User.withUsername("auditor").password(encoder.encode(auditorPassword))
+                        .roles("AUDITOR").build());
     }
 
     private static void requirePassword(String variable, String password) {
@@ -55,8 +59,13 @@ public class SecurityConfig {
                 .antMatchers("/", "/index.html", "/favicon.ico", "/error", "/css/**", "/js/**",
                         "/assets/**", "/images/**", "/*.css", "/*.js", "/api/session").permitAll()
                 .antMatchers(org.springframework.http.HttpMethod.POST,
-                        "/api/refunds/*/approve", "/api/refunds/*/reject").hasRole("APPROVER")
-                .antMatchers(org.springframework.http.HttpMethod.POST, "/api/refunds", "/api/demo/reset")
+                        "/api/demo/reset", "/api/demo/reset/**")
+                        .hasRole("DEMO_OPERATOR")
+                .antMatchers(org.springframework.http.HttpMethod.POST,
+                        "/api/refunds/*/approve", "/api/refunds/*/approve/**",
+                        "/api/refunds/*/reject", "/api/refunds/*/reject/**").hasRole("APPROVER")
+                .antMatchers(org.springframework.http.HttpMethod.POST,
+                        "/api/refunds", "/api/refunds/**")
                         .hasRole("REQUESTOR")
                 .antMatchers("/api/**").authenticated()
                 .anyRequest().authenticated()

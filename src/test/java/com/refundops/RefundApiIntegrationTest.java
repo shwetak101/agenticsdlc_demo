@@ -20,6 +20,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
@@ -31,6 +32,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "REFUNDS_DAHNESH_PASSWORD=test-only-dahnesh-password",
         "REFUNDS_SHWETA_PASSWORD=test-only-shweta-password",
+        "REFUNDS_AUDITOR_PASSWORD=test-only-auditor-password",
         "spring.main.banner-mode=off",
         "logging.level.root=WARN"
 })
@@ -68,8 +70,9 @@ class RefundApiIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"dahnesh,Dahnesh,2", "shweta,Shweta,1"})
-    void realLoginEstablishesExactIdentityAndRotatesCsrf(String username, String displayName, int roleCount)
+    @CsvSource({"dahnesh,Dahnesh,REQUESTOR|APPROVER|DEMO_OPERATOR", "shweta,Shweta,REQUESTOR",
+            "auditor,Auditor,AUDITOR"})
+    void realLoginEstablishesExactIdentityAndRotatesCsrf(String username, String displayName, String roles)
             throws Exception {
         Session anonymous = session(null);
         String oldSessionId = anonymous.http.getId();
@@ -85,22 +88,19 @@ class RefundApiIntegrationTest {
                 .andExpect(jsonPath("$.authenticated").value(true))
                 .andExpect(jsonPath("$.user.username").value(username))
                 .andExpect(jsonPath("$.user.displayName").value(displayName))
-                .andExpect(jsonPath("$.user.roles", hasSize(roleCount)))
-                .andExpect(jsonPath("$.user.roles[0]").value("REQUESTOR"));
-        if ("dahnesh".equals(username)) {
-            mvc.perform(get("/api/session").session(loggedIn.http))
-                    .andExpect(jsonPath("$.user.roles[1]").value("APPROVER"));
-        }
+                .andExpect(jsonPath("$.user.roles", contains(roles.split("\\|"))))
+                .andExpect(jsonPath("$.user.password").doesNotExist());
         mvc.perform(post("/api/demo/reset").session(loggedIn.http)
                         .header(anonymous.headerName, anonymous.token))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("CSRF_INVALID"));
     }
 
-    @Test
-    void invalidCredentialsProduceJson401() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"dahnesh", "shweta", "auditor"})
+    void invalidCredentialsProduceJson401(String username) throws Exception {
         Session anonymous = session(null);
         mvc.perform(post("/login").session(anonymous.http)
-                        .param("username", "dahnesh").param("password", "wrong-test-password")
+                        .param("username", username).param("password", "wrong-test-password")
                         .param(anonymous.parameterName, anonymous.token))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.code").value("INVALID_CREDENTIALS"))
@@ -133,9 +133,10 @@ class RefundApiIntegrationTest {
                 .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
     }
 
-    @Test
-    void refundResetAndLogoutRequireCsrfAndLogoutClearsAuthentication() throws Exception {
-        Session auth = login("shweta");
+    @ParameterizedTest
+    @ValueSource(strings = {"dahnesh", "shweta", "auditor"})
+    void refundResetAndLogoutRequireCsrfAndLogoutClearsAuthentication(String username) throws Exception {
+        Session auth = login(username);
         mvc.perform(post("/api/refunds").session(auth.http)
                         .contentType(MediaType.APPLICATION_JSON).content(payload("ORD-1042").toString()))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("CSRF_INVALID"));
@@ -153,7 +154,7 @@ class RefundApiIntegrationTest {
 
     @Test
     @WithMockUser(username = "dahnesh", roles = "APPROVER")
-    void approverWithoutRequestorCannotSubmitOrReset() throws Exception {
+    void approverWithoutRequestorOrOperatorCannotSubmitOrReset() throws Exception {
         mvc.perform(post("/api/refunds").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content(payload("ORD-1042").toString()))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
@@ -162,9 +163,10 @@ class RefundApiIntegrationTest {
         assertThat(service.dashboard().refunds).isEmpty();
     }
 
-    @Test
-    void dashboardHasExactMetadataAndDeterministicSyntheticBaseline() throws Exception {
-        Session auth = login("dahnesh");
+    @ParameterizedTest
+    @ValueSource(strings = {"dahnesh", "shweta", "auditor"})
+    void dashboardHasExactMetadataAndDeterministicSyntheticBaseline(String username) throws Exception {
+        Session auth = login(username);
         JsonNode dashboard = json(mvc.perform(get("/api/dashboard").session(auth.http))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.orders", hasSize(12)))
@@ -189,6 +191,97 @@ class RefundApiIntegrationTest {
         JsonNode baseline = dashboard.get("events").get(0);
         assertThat(baseline.size()).isEqualTo(7);
         assertThat(baseline.get("refundId").isNull()).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/refunds", "/api/refunds/RF-2001/approve",
+            "/api/refunds/RF-2001/reject", "/api/demo/reset"})
+    void auditorCanReadAllSharedRecordsButCannotWriteWithValidCsrf(String path) throws Exception {
+        Session shweta = login("shweta");
+        mvc.perform(refund(shweta, payload("ORD-1044"))).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.refund.id").value("RF-2001"));
+        mvc.perform(refund(shweta, payload("ORD-1046"))).andExpect(status().isCreated());
+        JsonNode before = json(mvc.perform(get("/api/dashboard").session(shweta.http)).andReturn());
+
+        Session auditor = login("auditor");
+        JsonNode visible = json(mvc.perform(get("/api/dashboard").session(auditor.http))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orders", hasSize(12)))
+                .andExpect(jsonPath("$.refunds", hasSize(2)))
+                .andExpect(jsonPath("$.approvalQueue", hasSize(1)))
+                .andExpect(jsonPath("$.payments", hasSize(1)))
+                .andExpect(jsonPath("$.events", hasSize(3))).andReturn());
+        assertThat(visible).isEqualTo(before);
+
+        mvc.perform(post(path).session(auditor.http).header(auditor.headerName, auditor.token)
+                        .contentType(MediaType.APPLICATION_JSON).content(payload("ORD-1045").toString()))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        JsonNode after = json(mvc.perform(get("/api/dashboard").session(auditor.http))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(after).isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/demo/reset", "/api/demo/reset/"})
+    void requestorCannotResetSharedDataWithValidCsrf(String path) throws Exception {
+        Session shweta = login("shweta");
+        mvc.perform(refund(shweta, payload("ORD-1046"))).andExpect(status().isCreated());
+        JsonNode before = json(mvc.perform(get("/api/dashboard").session(shweta.http)).andReturn());
+        mvc.perform(post(path).session(shweta.http).header(shweta.headerName, shweta.token))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        assertThat(json(mvc.perform(get("/api/dashboard").session(shweta.http)).andReturn())).isEqualTo(before);
+    }
+
+    @Test
+    @WithMockUser(username = "dahnesh", roles = {"REQUESTOR", "APPROVER"})
+    void resetRequiresOperatorAuthorityNotUsernameOrBusinessRoles() throws Exception {
+        mvc.perform(post("/api/demo/reset").with(csrf()))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+    }
+
+    @Test
+    @WithMockUser(username = "auditor", roles = "DEMO_OPERATOR")
+    void forgedOperatorAuthorityCannotResetCanonicalAuditor() throws Exception {
+        service.create("shweta", mapper.treeToValue(payload("ORD-1046"), RefundRequest.class));
+        JsonNode before = mapper.valueToTree(service.dashboard());
+        mvc.perform(post("/api/demo/reset").with(csrf()))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("DEMO_OPERATOR_REQUIRED"));
+        assertThat(mapper.<JsonNode>valueToTree(service.dashboard())).isEqualTo(before);
+    }
+
+    @Test
+    @WithMockUser(username = "dahnesh", roles = "DEMO_OPERATOR")
+    void operatorAuthorityOnlyAllowsResetNotBusinessWrites() throws Exception {
+        service.create("shweta", mapper.treeToValue(payload("ORD-1044"), RefundRequest.class));
+        JsonNode before = mapper.valueToTree(service.dashboard());
+        for (String path : new String[]{"/api/refunds", "/api/refunds/RF-2001/approve",
+                "/api/refunds/RF-2001/reject"}) {
+            mvc.perform(post(path).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                            .content(payload("ORD-1046").toString()))
+                    .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        }
+        assertThat(mapper.<JsonNode>valueToTree(service.dashboard())).isEqualTo(before);
+        mvc.perform(post("/api/demo/reset").with(csrf())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.refunds", hasSize(0)))
+                .andExpect(jsonPath("$.approvalQueue", hasSize(0)))
+                .andExpect(jsonPath("$.payments", hasSize(0)))
+                .andExpect(jsonPath("$.events", hasSize(1)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"approve", "reject"})
+    void approvalDecisionsStillRequireValidCsrf(String action) throws Exception {
+        Session dahnesh = login("dahnesh");
+        service.create("shweta", mapper.treeToValue(payload("ORD-1044"), RefundRequest.class));
+        for (String token : new String[]{"", "invalid-csrf-token"}) {
+            mvc.perform(post("/api/refunds/RF-2001/" + action).session(dahnesh.http)
+                            .header(dahnesh.headerName, token)
+                            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                    .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("CSRF_INVALID"));
+        }
+        assertThat(service.dashboard().approvalQueue).hasSize(1);
+        assertThat(service.dashboard().payments).isEmpty();
     }
 
     @ParameterizedTest
@@ -312,10 +405,12 @@ class RefundApiIntegrationTest {
         mvc.perform(refund(dahnesh, request)).andExpect(status().isCreated());
         mvc.perform(get("/api/dashboard").session(shweta.http))
                 .andExpect(jsonPath("$.refunds", hasSize(1)));
-        JsonNode restored = json(mvc.perform(post("/api/demo/reset").session(shweta.http)
-                .header(shweta.headerName, shweta.token)).andExpect(status().isOk()).andReturn());
+        JsonNode restored = json(mvc.perform(post("/api/demo/reset").session(dahnesh.http)
+                .header(dahnesh.headerName, dahnesh.token)).andExpect(status().isOk()).andReturn());
         assertThat(restored).isEqualTo(original);
         mvc.perform(get("/api/dashboard").session(dahnesh.http))
+                .andExpect(jsonPath("$.refunds", hasSize(0)));
+        mvc.perform(get("/api/dashboard").session(login("auditor").http))
                 .andExpect(jsonPath("$.refunds", hasSize(0)));
         mvc.perform(refund(shweta, request)).andExpect(status().isCreated())
                 .andExpect(jsonPath("$.replayed").value(false))

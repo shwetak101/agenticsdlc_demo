@@ -50,6 +50,10 @@ public class RefundService {
             throw new ConstraintViolationException(violations);
         }
         DemoUsers.User requester = DemoUsers.get(username);
+        if (!requester.roles.contains("REQUESTOR")) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "REQUESTOR_REQUIRED",
+                    "Only a requestor can submit refunds.");
+        }
         String key = UUID.fromString(request.idempotencyKey).toString();
         String notes = request.notes == null ? "" : request.notes;
         Submission previous = submissions.get(key);
@@ -199,6 +203,15 @@ public class RefundService {
                 .filter(submission -> submission.result.refund.id.equals(refund.id))
                 .findFirst()
                 .ifPresent(submission -> submission.result = new RefundResult(refund, payment, false));
+    }
+
+    public synchronized Dashboard reset(String username) {
+        DemoUsers.User operator = DemoUsers.get(username);
+        if (!operator.roles.contains("DEMO_OPERATOR")) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "DEMO_OPERATOR_REQUIRED",
+                    "Only a demo operator can reset shared data.");
+        }
+        return reset();
     }
 
     public synchronized Dashboard reset() {

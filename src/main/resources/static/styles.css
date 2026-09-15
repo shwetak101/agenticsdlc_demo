@@ -74,6 +74,7 @@ svg.icon { width: 19px; height: 19px; flex-shrink: 0; fill: none; stroke: var(--
 .login-card > p { margin-bottom: 28px; }
 .account-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 24px; }
 .account-card { background: var(--cp-surface); text-align: left; padding: 14px; display: flex; align-items: center; gap: 10px; }
+.account-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .account-card:hover, .account-card.selected { border-color: var(--cp-accent); background: var(--cp-accent-soft); }
 .account-card strong, .account-card small { display: block; }
 .account-card small { font-size: 10px; color: var(--cp-text-muted); margin-top: 2px; }

@@ -4,8 +4,10 @@ import java.util.List;
 import org.springframework.http.HttpStatus;
 
 public final class DemoUsers {
-    private static final User DAHNESH = new User("dahnesh", "Dahnesh", List.of("REQUESTOR", "APPROVER"));
+    private static final User DAHNESH = new User("dahnesh", "Dahnesh",
+            List.of("REQUESTOR", "APPROVER", "DEMO_OPERATOR"));
     private static final User SHWETA = new User("shweta", "Shweta", List.of("REQUESTOR"));
+    private static final User AUDITOR = new User("auditor", "Auditor", List.of("AUDITOR"));
 
     private DemoUsers() {
     }
@@ -16,6 +18,9 @@ public final class DemoUsers {
         }
         if (SHWETA.username.equals(username)) {
             return SHWETA;
+        }
+        if (AUDITOR.username.equals(username)) {
+            return AUDITOR;
         }
         throw new ApiException(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "Unknown demo user.");
     }
