@@ -4,10 +4,10 @@ REFUNDOPS - HIGH-VALUE APPROVAL CANDIDATE
 Purpose
 -------
 A local, synthetic refund-operations application for an agentic software
-engineering demonstration. Refunds of INR 10,000 or less are sent immediately
-to a mock payment provider. Refunds above INR 10,000 wait for an independent
-approver, and rejection sends no payment instruction. There is no production
-payment connection and no AI model embedded in the application.
+engineering demonstration. By default, refunds of INR 10,000 or less are sent
+immediately to a mock payment provider. Refunds above the configured threshold
+wait for an independent approver, and rejection sends no payment instruction.
+There is no production payment connection and no AI model embedded in the application.
 
 The browser interface is deliberately polished while the backend targets
 Java 11 and Spring Boot 2.7.18. Spring Boot 2.7 is an intentionally outdated
@@ -73,8 +73,41 @@ Never commit override passwords or reuse real account passwords.
 Sessions use Spring Security, server-assigned roles and CSRF protection.
 HTTP is acceptable here only because this is a loopback-only local demo.
 
-Suggested on-screen walkthrough
--------------------------------
+Startup approval policy
+-----------------------
+The immutable policy is configured once at startup:
+
+Property                       Environment variable          Default
+refunds.approval.threshold      REFUNDS_APPROVAL_THRESHOLD    10000 (INR)
+refunds.approval.version        REFUNDS_APPROVAL_VERSION      refund-policy-v1
+
+For example, in PowerShell before launching:
+
+    $env:REFUNDS_APPROVAL_THRESHOLD = '25000.50'
+    $env:REFUNDS_APPROVAL_VERSION = 'refund-policy-v2'
+    .\Start-Demo.ps1
+
+Alternatively supply these properties in application.properties or as Java JAR
+arguments: --refunds.approval.threshold=25000.50 --refunds.approval.version=refund-policy-v2
+Thresholds must be non-negative decimal INR amounts with at most two decimal
+places. Zero is valid. Negative, malformed, empty, or over-precision thresholds
+and blank versions fail startup with a configuration error; they do not silently
+use the defaults. Defaults apply only when a setting is absent.
+
+Exactly the threshold processes automatically; only greater amounts require an
+independent approver. The dashboard exposes the active approvalThreshold and
+policyVersion. Every refund records its own approvalThreshold and policyVersion
+at creation, including automatically sent refunds. Decisions, immutable
+snapshots and idempotent replays retain those original policy values and notes;
+decisions never reclassify a refund using a newer rule. Use a new version label
+when changing the threshold. There is no policy editing API or admin screen.
+
+Policy configuration adds no resets or data migration. Restarting still clears
+the demo's in-memory state as before; an explicit demo reset retains the active
+startup policy.
+
+Suggested on-screen walkthrough (default policy)
+------------------------------------------------
 1. Sign in as Dahnesh; point out the identity and both application roles.
 2. Request the INR 2,500 or INR 10,000 full-order refund and show its immediate
    payment receipt.
@@ -110,7 +143,7 @@ Implementation boundaries
 - Amounts and requester identity come from the server.
 - Repeated identical submissions with one idempotency key reuse the original
   result; conflicting requests do not send a second payment.
-- Amounts above INR 10,000 enter PENDING_APPROVAL without a payment.
+- Amounts above the configured INR threshold enter PENDING_APPROVAL without a payment.
 - Only an authenticated Approver other than the requester may decide a pending
   refund. Approval sends one payment; rejection sends none.
 - Atomic in-memory processing prevents concurrent duplicate decisions and sends.
