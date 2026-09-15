@@ -1,0 +1,18 @@
+REFUNDOPS SPECIALIST PROFILES
+
+Four profiles are defined under .github/agents:
+- Java Modernisation: supported framework migration and regression preservation.
+- Security Assurance: scoped authorisation and evidence-based remediation.
+- Test and Reliability: boundaries, concurrency and deterministic failure recovery.
+- Platform: private, repeatable Codespaces and delivery configuration.
+
+These are specialised Copilot profiles, not separately running services or
+independent AI providers. Existing Copilot and Claude cloud agents remain distinct.
+Profiles must be present on the default branch to be discovered on GitHub.
+Choose a profile in the native agent selector when starting an authorised task.
+A configured profile is not evidence that it has executed; use actual session
+records to demonstrate activity. None of these profiles is a human reviewer.
+
+copilot-setup-steps.yml prepares JDK 21 and Maven dependencies. It does not grant
+merge rights, disable firewalls or approve code. Existing source may still target
+Java 11 until a separate modernisation PR is reviewed.
