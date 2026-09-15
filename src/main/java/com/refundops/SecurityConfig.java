@@ -55,7 +55,8 @@ public class SecurityConfig {
                 .antMatchers("/", "/index.html", "/favicon.ico", "/error", "/css/**", "/js/**",
                         "/assets/**", "/images/**", "/*.css", "/*.js", "/api/session").permitAll()
                 .antMatchers(org.springframework.http.HttpMethod.POST,
-                        "/api/refunds/*/approve", "/api/refunds/*/reject").hasRole("APPROVER")
+                        "/api/refunds/*/approve", "/api/refunds/*/reject",
+                        "/api/refunds/*/reconcile", "/api/refunds/*/retry").hasRole("APPROVER")
                 .antMatchers(org.springframework.http.HttpMethod.POST, "/api/refunds", "/api/demo/reset")
                         .hasRole("REQUESTOR")
                 .antMatchers("/api/**").authenticated()

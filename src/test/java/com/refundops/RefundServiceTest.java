@@ -67,7 +67,7 @@ class RefundServiceTest {
             }
             assertThat(newResults).isEqualTo(1);
             assertThat(service.dashboard().payments).hasSize(1);
-            verify(provider, times(1)).send(anyString(), any(), any());
+            verify(provider, times(1)).send(anyString(), anyString(), any(), any());
         } finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
@@ -106,7 +106,7 @@ class RefundServiceTest {
             assertThat(snapshot.refunds).hasSize(1);
             assertThat(snapshot.payments).hasSize(1);
             assertThat(snapshot.events).hasSize(2);
-            verify(provider, times(1)).send(anyString(), any(), any());
+            verify(provider, times(1)).send(anyString(), anyString(), any(), any());
         } finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
@@ -125,6 +125,8 @@ class RefundServiceTest {
         assertThatThrownBy(() -> sent.refunds.clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> sent.payments.clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> sent.events.clear()).isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> sent.providerOperations.clear())
+                .isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> DemoUsers.get("dahnesh").roles.clear())
                 .isInstanceOf(UnsupportedOperationException.class);
         service.reset();
@@ -155,14 +157,14 @@ class RefundServiceTest {
         assertThat(pending.payment).isNull();
         assertThat(service.dashboard().approvalQueue).containsExactly(pending.refund);
         assertThat(service.dashboard().payments).isEmpty();
-        verify(provider, times(0)).send(anyString(), any(), any());
+        verify(provider, times(0)).send(anyString(), anyString(), any(), any());
 
         RefundResult approved = service.approve("dahnesh", pending.refund.id, decision("Reviewed independently"));
         assertThat(approved.refund.status).isEqualTo("SENT_TO_PROVIDER");
         assertThat(approved.refund.decidedByUsername).isEqualTo("dahnesh");
         assertThat(approved.payment.id).isEqualTo("PAY-3001");
         assertThat(service.dashboard().approvalQueue).isEmpty();
-        verify(provider, times(1)).send(anyString(), any(), any());
+        verify(provider, times(1)).send(anyString(), anyString(), any(), any());
         RefundResult replay = service.create("shweta", request(key, "ORD-1044"));
         assertThat(replay.replayed).isTrue();
         assertThat(replay.refund.status).isEqualTo("SENT_TO_PROVIDER");
@@ -201,7 +203,118 @@ class RefundServiceTest {
                 assertThat(future.get(15, TimeUnit.SECONDS).payment.id).isEqualTo("PAY-3001");
             }
             assertThat(service.dashboard().payments).hasSize(1);
-            verify(provider, times(1)).send(anyString(), any(), any());
+            verify(provider, times(1)).send(anyString(), anyString(), any(), any());
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void confirmedNotSentPersistsApprovedRefundUntilExplicitRetry() {
+        useFaultProfile("CONFIRMED_NOT_SENT_ONCE");
+        String key = UUID.randomUUID().toString();
+        RefundResult pending = service.create("shweta", request(key, "ORD-1044"));
+
+        assertThatThrownBy(() -> service.approve("dahnesh", pending.refund.id, decision("Approved")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    assertThat(((ApiException) error).getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(((ApiException) error).getCode()).isEqualTo("PROVIDER_CONFIRMED_NOT_SENT");
+                });
+
+        Dashboard failed = service.dashboard();
+        assertThat(failed.refunds.get(0).status).isEqualTo("PROVIDER_RETRY_REQUIRED");
+        assertThat(failed.refunds.get(0).decidedByUsername).isEqualTo("dahnesh");
+        assertThat(failed.payments).isEmpty();
+        assertThat(failed.providerOperations).singleElement().satisfies(operation -> {
+            assertThat(operation.status).isEqualTo("CONFIRMED_NOT_SENT");
+            assertThat(operation.attemptCount).isEqualTo(1);
+            assertThat(operation.providerIdempotencyKey).isEqualTo("mockpay-refund:RF-2001");
+        });
+        assertThat(provider.receiptCount()).isZero();
+
+        RefundResult replay = service.create("shweta", request(key, "ORD-1044"));
+        assertThat(replay.replayed).isTrue();
+        assertThat(replay.refund.status).isEqualTo("PROVIDER_RETRY_REQUIRED");
+        verify(provider, times(1)).send(anyString(), anyString(), any(), any());
+
+        RefundResult recovered = service.retryProvider("dahnesh", pending.refund.id, confirmedRetry());
+        assertThat(recovered.refund.status).isEqualTo("SENT_TO_PROVIDER");
+        assertThat(recovered.payment.id).isEqualTo("PAY-3001");
+        assertThat(service.dashboard().payments).hasSize(1);
+        assertThat(service.dashboard().providerOperations.get(0).attemptCount).isEqualTo(2);
+        assertThat(provider.receiptCount()).isEqualTo(1);
+        verify(provider, times(2)).send(anyString(), anyString(), any(), any());
+    }
+
+    @Test
+    void acceptedResponseLostReconcilesReceiptWithoutResubmission() {
+        useFaultProfile("ACCEPTED_RESPONSE_LOST_ONCE");
+        String key = UUID.randomUUID().toString();
+
+        assertThatThrownBy(() -> service.create("shweta", request(key, "ORD-1046")))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("PROVIDER_OUTCOME_UNKNOWN");
+        assertThat(service.dashboard().refunds.get(0).status).isEqualTo("PROVIDER_OUTCOME_UNKNOWN");
+        assertThat(service.dashboard().payments).isEmpty();
+        assertThat(service.dashboard().providerOperations.get(0).status).isEqualTo("OUTCOME_UNKNOWN");
+        assertThat(provider.receiptCount()).isEqualTo(1);
+
+        RefundResult replay = service.create("shweta", request(key, "ORD-1046"));
+        assertThat(replay.replayed).isTrue();
+        assertThat(replay.payment).isNull();
+        assertThatThrownBy(() -> service.retryProvider("dahnesh", replay.refund.id, confirmedRetry()))
+                .isInstanceOf(ApiException.class)
+                .extracting(error -> ((ApiException) error).getCode())
+                .isEqualTo("PROVIDER_RETRY_NOT_ALLOWED");
+        verify(provider, times(1)).send(anyString(), anyString(), any(), any());
+
+        RefundResult reconciled = service.reconcileProvider("dahnesh", replay.refund.id);
+        assertThat(reconciled.payment.id).isEqualTo("PAY-3001");
+        RefundResult repeated = service.reconcileProvider("dahnesh", replay.refund.id);
+        assertThat(repeated.replayed).isTrue();
+        assertThat(repeated.payment).isSameAs(reconciled.payment);
+        assertThat(service.dashboard().payments).containsExactly(reconciled.payment);
+        assertThat(provider.receiptCount()).isEqualTo(1);
+        verify(provider, times(1)).send(anyString(), anyString(), any(), any());
+
+        service.reset();
+        assertThat(provider.receiptCount()).isZero();
+        assertThat(service.dashboard().providerOperations).isEmpty();
+    }
+
+    @Test
+    void concurrentExplicitRetriesReplayOneProviderReceipt() throws Exception {
+        useFaultProfile("CONFIRMED_NOT_SENT_ONCE");
+        String key = UUID.randomUUID().toString();
+        assertThatThrownBy(() -> service.create("shweta", request(key, "ORD-1046")))
+                .isInstanceOf(ApiException.class);
+        String refundId = service.dashboard().refunds.get(0).id;
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<RefundResult>> futures = new ArrayList<>();
+            for (int i = 0; i < 24; i++) {
+                futures.add(executor.submit(() -> {
+                    start.await();
+                    return service.retryProvider("dahnesh", refundId, confirmedRetry());
+                }));
+            }
+            start.countDown();
+            int recovered = 0;
+            for (Future<RefundResult> future : futures) {
+                RefundResult result = future.get(15, TimeUnit.SECONDS);
+                assertThat(result.payment.id).isEqualTo("PAY-3001");
+                if (!result.replayed) {
+                    recovered++;
+                }
+            }
+            assertThat(recovered).isEqualTo(1);
+            assertThat(service.dashboard().payments).hasSize(1);
+            assertThat(provider.receiptCount()).isEqualTo(1);
+            verify(provider, times(2)).send(anyString(), anyString(), any(), any());
         } finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
@@ -237,6 +350,17 @@ class RefundServiceTest {
         ApprovalDecisionRequest request = new ApprovalDecisionRequest();
         request.notes = notes;
         return request;
+    }
+
+    private ProviderRetryRequest confirmedRetry() {
+        ProviderRetryRequest request = new ProviderRetryRequest();
+        request.confirmed = true;
+        return request;
+    }
+
+    private void useFaultProfile(String faultProfile) {
+        provider = spy(new MockPayProvider(faultProfile));
+        service = new RefundService(provider, factory.getValidator());
     }
 
     private RefundModels.Order order(Dashboard dashboard, String orderId) {

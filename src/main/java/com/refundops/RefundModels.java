@@ -26,12 +26,15 @@ public final class RefundModels {
         public final List<Payment> payments;
         public final List<Event> events;
         public final List<Refund> approvalQueue;
+        public final List<ProviderOperation> providerOperations;
 
-        public Dashboard(List<Order> orders, List<Refund> refunds, List<Payment> payments, List<Event> events) {
+        public Dashboard(List<Order> orders, List<Refund> refunds, List<Payment> payments,
+                         List<Event> events, List<ProviderOperation> providerOperations) {
             this.orders = List.copyOf(orders);
             this.refunds = List.copyOf(refunds);
             this.payments = List.copyOf(payments);
             this.events = List.copyOf(events);
+            this.providerOperations = List.copyOf(providerOperations);
             this.approvalQueue = refunds.stream()
                     .filter(refund -> "PENDING_APPROVAL".equals(refund.status))
                     .collect(java.util.stream.Collectors.toUnmodifiableList());
@@ -125,6 +128,28 @@ public final class RefundModels {
             return new Refund(this, status, paymentId, decidedBy, decidedAt, decisionNotes);
         }
 
+        public Refund providerStatus(String status) {
+            return new Refund(this, status);
+        }
+
+        private Refund(Refund original, String status) {
+            this.id = original.id;
+            this.orderId = original.orderId;
+            this.customerName = original.customerName;
+            this.amount = original.amount;
+            this.requesterUsername = original.requesterUsername;
+            this.requesterName = original.requesterName;
+            this.reason = original.reason;
+            this.notes = original.notes;
+            this.status = status;
+            this.requestedAt = original.requestedAt;
+            this.paymentId = original.paymentId;
+            this.decidedByUsername = original.decidedByUsername;
+            this.decidedByName = original.decidedByName;
+            this.decidedAt = original.decidedAt;
+            this.decisionNotes = original.decisionNotes;
+        }
+
         private Refund(Refund original, String status, String paymentId, DemoUsers.User decidedBy,
                        Instant decidedAt, String decisionNotes) {
             this.id = original.id;
@@ -184,6 +209,56 @@ public final class RefundModels {
             this.detail = detail;
             this.actorDisplayName = actorDisplayName;
             this.refundId = refundId;
+        }
+    }
+
+    public static final class ProviderOperation {
+        public final String refundId;
+        public final String orderId;
+        public final String paymentId;
+        public final String providerIdempotencyKey;
+        public final String status;
+        public final int attemptCount;
+        public final Instant lastAttemptAt;
+        public final String failureCode;
+        public final String failureMessage;
+        public final String resolvedByUsername;
+        public final String resolvedByName;
+        public final Instant resolvedAt;
+
+        public ProviderOperation(String refundId, String orderId, String paymentId,
+                                 String providerIdempotencyKey, String status, int attemptCount,
+                                 Instant lastAttemptAt, String failureCode, String failureMessage,
+                                 DemoUsers.User resolvedBy, Instant resolvedAt) {
+            this.refundId = refundId;
+            this.orderId = orderId;
+            this.paymentId = paymentId;
+            this.providerIdempotencyKey = providerIdempotencyKey;
+            this.status = status;
+            this.attemptCount = attemptCount;
+            this.lastAttemptAt = lastAttemptAt;
+            this.failureCode = failureCode;
+            this.failureMessage = failureMessage;
+            this.resolvedByUsername = resolvedBy == null ? null : resolvedBy.username;
+            this.resolvedByName = resolvedBy == null ? null : resolvedBy.displayName;
+            this.resolvedAt = resolvedAt;
+        }
+
+        public ProviderOperation beginAttempt(Instant attemptedAt) {
+            return new ProviderOperation(refundId, orderId, paymentId, providerIdempotencyKey,
+                    "SUBMITTING", attemptCount + 1, attemptedAt,
+                    failureCode, failureMessage, null, null);
+        }
+
+        public ProviderOperation failed(String status, String code, String message) {
+            return new ProviderOperation(refundId, orderId, paymentId, providerIdempotencyKey,
+                    status, attemptCount, lastAttemptAt, code, message, null, null);
+        }
+
+        public ProviderOperation resolved(DemoUsers.User actor, Instant at) {
+            return new ProviderOperation(refundId, orderId, paymentId, providerIdempotencyKey,
+                    "RECEIPT_CONFIRMED", attemptCount, lastAttemptAt,
+                    failureCode, failureMessage, actor, at);
         }
     }
 

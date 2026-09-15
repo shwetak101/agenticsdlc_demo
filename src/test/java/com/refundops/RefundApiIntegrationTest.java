@@ -131,6 +131,11 @@ class RefundApiIntegrationTest {
         mvc.perform(post("/api/refunds/RF-2001/approve").with(csrf())
                         .contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
+        mvc.perform(post("/api/refunds/RF-2001/reconcile").with(csrf()))
+                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
+        mvc.perform(post("/api/refunds/RF-2001/retry").with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"confirmed\":true}"))
+                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
     }
 
     @Test
@@ -173,7 +178,7 @@ class RefundApiIntegrationTest {
                 .andExpect(jsonPath("$.events", hasSize(1)))
                 .andExpect(jsonPath("$.approvalQueue", hasSize(0)))
                 .andReturn());
-        assertThat(dashboard.size()).isEqualTo(6);
+        assertThat(dashboard.size()).isEqualTo(7);
         assertThat(dashboard.get("application")).isEqualTo(mapper.readTree(
                 "{\"name\":\"RefundOps\",\"version\":\"High-value approval candidate\",\"javaBaseline\":\"11\","
                         + "\"springBootVersion\":\"2.7.18\",\"mode\":\"THRESHOLD_APPROVAL\","
@@ -189,6 +194,36 @@ class RefundApiIntegrationTest {
         JsonNode baseline = dashboard.get("events").get(0);
         assertThat(baseline.size()).isEqualTo(7);
         assertThat(baseline.get("refundId").isNull()).isTrue();
+        assertThat(dashboard.get("providerOperations").isEmpty()).isTrue();
+    }
+
+    @Test
+    void recoveryEndpointsRequireApproverRoleAndCsrf() throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        mvc.perform(post("/api/refunds/RF-2001/reconcile").session(shweta.http)
+                        .header(shweta.headerName, shweta.token))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        mvc.perform(post("/api/refunds/RF-2001/retry").session(shweta.http)
+                        .header(shweta.headerName, shweta.token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"confirmed\":true}"))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        mvc.perform(post("/api/refunds/RF-2001/reconcile").session(dahnesh.http))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("CSRF_INVALID"));
+        mvc.perform(post("/api/refunds/RF-2001/retry").session(dahnesh.http)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"confirmed\":true}"))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("CSRF_INVALID"));
+        mvc.perform(post("/api/refunds/RF-2001/reconcile").session(dahnesh.http)
+                        .header(dahnesh.headerName, dahnesh.token))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("REFUND_NOT_FOUND"));
+        mvc.perform(post("/api/refunds/RF-2001/retry").session(dahnesh.http)
+                        .header(dahnesh.headerName, dahnesh.token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"confirmed\":true}"))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("REFUND_NOT_FOUND"));
+        mvc.perform(post("/api/refunds/RF-2001/retry").session(dahnesh.http)
+                        .header(dahnesh.headerName, dahnesh.token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"confirmed\":false}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
     }
 
     @ParameterizedTest
