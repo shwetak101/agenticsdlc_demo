@@ -53,14 +53,14 @@ public class RefundController {
     @PostMapping("/refunds/{refundId}/approve")
     public RefundModels.RefundResult approve(
             Authentication authentication, @PathVariable String refundId,
-            @Valid @RequestBody ApprovalDecisionRequest request) {
+            @RequestBody ApprovalDecisionRequest request) {
         return service.approve(authentication.getName(), refundId, request);
     }
 
     @PostMapping("/refunds/{refundId}/reject")
     public RefundModels.RefundResult reject(
             Authentication authentication, @PathVariable String refundId,
-            @Valid @RequestBody ApprovalDecisionRequest request) {
+            @RequestBody ApprovalDecisionRequest request) {
         return service.reject(authentication.getName(), refundId, request);
     }
 

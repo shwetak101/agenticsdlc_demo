@@ -26,6 +26,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
@@ -263,6 +264,10 @@ class RefundApiIntegrationTest {
         mvc.perform(decision(dahnesh, own.at("/refund/id").asText(), "approve"))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("SELF_APPROVAL_FORBIDDEN"));
+        mvc.perform(decision(dahnesh, own.at("/refund/id").asText(), "reject")
+                        .content(mapper.createObjectNode().put("notes", "x".repeat(501)).toString()))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("SELF_APPROVAL_FORBIDDEN"));
         assertThat(service.dashboard().payments).isEmpty();
 
         service.reset();
@@ -273,7 +278,154 @@ class RefundApiIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.refund.status").value("REJECTED"))
                 .andExpect(jsonPath("$.refund.decidedByUsername").value("dahnesh"))
+                .andExpect(jsonPath("$.refund.decisionNotes").value("Independent review"))
                 .andExpect(jsonPath("$.payment").value(nullValue()));
+        assertThat(service.dashboard().payments).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"notes\":null}", "{\"notes\":\"\"}", "{\"notes\":\"   \"}",
+            "{\"notes\":\"\\t\\r\\n\"}", "{\"notes\":\"\\u2003\"}", "{\"notes\":\"\\u00a0\"}",
+            "{\"notes\":\"\\u202f\"}"})
+    void rejectionRequiresJustificationAndReturnsClearJson400(String body) throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        ObjectNode request = payload("ORD-1044");
+        JsonNode pending = json(mvc.perform(refund(shweta, request))
+                .andExpect(status().isCreated()).andReturn());
+        JsonNode before = mapper.valueToTree(service.dashboard());
+        String refundId = pending.at("/refund/id").asText();
+
+        mvc.perform(decision(dahnesh, refundId, "reject").content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.code").value("REJECTION_JUSTIFICATION_REQUIRED"))
+                .andExpect(jsonPath("$.message").value("A rejection justification is required."));
+
+        assertThat(mapper.<JsonNode>valueToTree(service.dashboard())).isEqualTo(before);
+        mvc.perform(refund(shweta, request))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true))
+                .andExpect(jsonPath("$.refund.status").value("PENDING_APPROVAL"))
+                .andExpect(jsonPath("$.refund.decisionNotes").value(""))
+                .andExpect(jsonPath("$.payment").value(nullValue()));
+    }
+
+    @Test
+    void rejectionSecurityChecksPrecedeJustificationValidation() throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
+                .andExpect(status().isCreated()).andReturn());
+        String refundId = pending.at("/refund/id").asText();
+        JsonNode before = mapper.valueToTree(service.dashboard());
+        String invalidBody = mapper.createObjectNode().put("notes", "x".repeat(501)).toString();
+
+        mvc.perform(post("/api/refunds/{refundId}/reject", refundId).with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON).content(invalidBody))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
+        mvc.perform(decision(shweta, refundId, "reject").content(invalidBody))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("ACCESS_DENIED"));
+        mvc.perform(post("/api/refunds/{refundId}/reject", refundId).session(dahnesh.http)
+                        .contentType(MediaType.APPLICATION_JSON).content(invalidBody))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("CSRF_INVALID"));
+        assertThat(mapper.<JsonNode>valueToTree(service.dashboard())).isEqualTo(before);
+    }
+
+    @Test
+    void rejectionStateCheckPrecedesDecisionNotesValidation() throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
+                .andExpect(status().isCreated()).andReturn());
+        String refundId = pending.at("/refund/id").asText();
+        mvc.perform(decision(dahnesh, refundId, "approve"))
+                .andExpect(status().isOk());
+        JsonNode before = mapper.valueToTree(service.dashboard());
+
+        mvc.perform(decision(dahnesh, refundId, "reject")
+                        .content(mapper.createObjectNode().put("notes", "x".repeat(501)).toString()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("DECISION_ALREADY_MADE"));
+
+        assertThat(mapper.<JsonNode>valueToTree(service.dashboard())).isEqualTo(before);
+        assertThat(service.dashboard().payments).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"notes\":null}", "{\"notes\":\"\"}", "{\"notes\":\" \\t\\n \"}"})
+    void approvalNotesRemainOptional(String body) throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
+                .andExpect(status().isCreated()).andReturn());
+
+        mvc.perform(decision(dahnesh, pending.at("/refund/id").asText(), "approve").content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refund.status").value("SENT_TO_PROVIDER"))
+                .andExpect(jsonPath("$.payment.id").value("PAY-3001"));
+        assertThat(service.dashboard().payments).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"approve", "reject"})
+    void decisionNotesKeepTheir500CharacterLimit(String action) throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        JsonNode pending = json(mvc.perform(refund(shweta, payload("ORD-1044")))
+                .andExpect(status().isCreated()).andReturn());
+        String refundId = pending.at("/refund/id").asText();
+        JsonNode before = mapper.valueToTree(service.dashboard());
+        String notes = "Return documentation reviewed. " + "x".repeat(469);
+        assertThat(notes).hasSize(500);
+        mvc.perform(decision(dahnesh, refundId, action)
+                        .content(mapper.createObjectNode().put("notes", notes + "x").toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        assertThat(mapper.<JsonNode>valueToTree(service.dashboard())).isEqualTo(before);
+        mvc.perform(decision(dahnesh, refundId, action)
+                        .content(mapper.createObjectNode().put("notes", notes).toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refund.decisionNotes").value(notes));
+        assertThat(service.dashboard().payments).hasSize("approve".equals(action) ? 1 : 0);
+    }
+
+    @Test
+    void rejectionRetainsExactJustificationAcrossDashboardAndReplays() throws Exception {
+        Session shweta = login("shweta");
+        Session dahnesh = login("dahnesh");
+        ObjectNode request = payload("ORD-1044");
+        JsonNode pending = json(mvc.perform(refund(shweta, request))
+                .andExpect(status().isCreated()).andReturn());
+        String refundId = pending.at("/refund/id").asText();
+        String notes = " \tReturn not received.\n ";
+        String body = mapper.createObjectNode().put("notes", notes).toString();
+        JsonNode rejected = json(mvc.perform(decision(dahnesh, refundId, "reject").content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refund.status").value("REJECTED"))
+                .andExpect(jsonPath("$.refund.decisionNotes").value(notes))
+                .andExpect(jsonPath("$.refund.paymentId").value(nullValue()))
+                .andExpect(jsonPath("$.payment").value(nullValue()))
+                .andReturn());
+        mvc.perform(get("/api/dashboard").session(shweta.http))
+                .andExpect(jsonPath("$.refunds[0].decisionNotes").value(notes))
+                .andExpect(jsonPath("$.approvalQueue", hasSize(0)))
+                .andExpect(jsonPath("$.payments", hasSize(0)));
+        JsonNode replay = json(mvc.perform(decision(dahnesh, refundId, "reject"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(true)).andReturn());
+        assertThat(replay.get("refund")).isEqualTo(rejected.get("refund"));
+        mvc.perform(decision(dahnesh, refundId, "reject").content("{}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("REJECTION_JUSTIFICATION_REQUIRED"));
+        mvc.perform(refund(shweta, request))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refund.decisionNotes").value(notes))
+                .andExpect(jsonPath("$.refund.status").value("REJECTED"));
+        assertThat(service.dashboard().events).hasSize(3);
         assertThat(service.dashboard().payments).isEmpty();
     }
 

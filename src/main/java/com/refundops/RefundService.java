@@ -119,6 +119,7 @@ public class RefundService {
             return new RefundResult(refund, payment, true);
         }
         requirePending(refund);
+        validateDecision(request);
         String notes = decisionNotes(request);
         Instant now = Instant.now();
         String paymentId = "PAY-" + (paymentSequence + 1);
@@ -147,11 +148,16 @@ public class RefundService {
             throw new ApiException(HttpStatus.FORBIDDEN, "SELF_APPROVAL_FORBIDDEN",
                     "Requesters cannot reject their own refund.");
         }
-        if ("REJECTED".equals(refund.status) && approver.username.equals(refund.decidedByUsername)) {
+        boolean replayed = "REJECTED".equals(refund.status)
+                && approver.username.equals(refund.decidedByUsername);
+        if (!replayed) {
+            requirePending(refund);
+        }
+        validateDecision(request);
+        String notes = rejectionNotes(request);
+        if (replayed) {
             return new RefundResult(refund, null, true);
         }
-        requirePending(refund);
-        String notes = decisionNotes(request);
         Instant now = Instant.now();
         Refund rejected = refund.decide("REJECTED", null, approver, now, notes);
         refunds.set(index, rejected);
@@ -191,7 +197,28 @@ public class RefundService {
     }
 
     private static String decisionNotes(ApprovalDecisionRequest request) {
-        return request.notes == null ? "" : request.notes;
+        return request == null || request.notes == null ? "" : request.notes;
+    }
+
+    private void validateDecision(ApprovalDecisionRequest request) {
+        if (request == null) {
+            return;
+        }
+        Set<ConstraintViolation<ApprovalDecisionRequest>> violations = validator.validate(request);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
+    }
+
+    private static String rejectionNotes(ApprovalDecisionRequest request) {
+        String notes = decisionNotes(request);
+        boolean blank = notes.codePoints()
+                .allMatch(character -> Character.isWhitespace(character) || Character.isSpaceChar(character));
+        if (blank) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "REJECTION_JUSTIFICATION_REQUIRED",
+                    "A rejection justification is required.");
+        }
+        return notes;
     }
 
     private void updateSubmissionResult(Refund refund, Payment payment) {
