@@ -28,6 +28,7 @@ public class RefundService {
     private final List<Payment> payments = new ArrayList<>();
     private final List<Event> events = new ArrayList<>();
     private final Map<String, Submission> submissions = new LinkedHashMap<>();
+    private final Map<String, RefundModels.ProviderOperation> providerOperations = new LinkedHashMap<>();
     private final MockPayProvider provider;
     private final Validator validator;
     private int refundSequence;
@@ -41,7 +42,8 @@ public class RefundService {
     }
 
     public synchronized Dashboard dashboard() {
-        return new Dashboard(new ArrayList<>(orders.values()), refunds, payments, events);
+        return new Dashboard(new ArrayList<>(orders.values()), refunds, payments, events,
+                new ArrayList<>(providerOperations.values()));
     }
 
     public synchronized RefundResult create(String username, RefundRequest request) {
@@ -71,35 +73,30 @@ public class RefundService {
         Instant now = Instant.now();
         String refundId = "RF-" + (refundSequence + 1);
         refundSequence++;
-        Refund refund;
-        Payment payment;
         if (order.amount.compareTo(APPROVAL_THRESHOLD) > 0) {
-            refund = new Refund(refundId, order, requester, request.reason.name(), notes,
+            Refund refund = new Refund(refundId, order, requester, request.reason.name(), notes,
                     "PENDING_APPROVAL", now, null, null, null, "");
-            payment = null;
             orders.put(order.id, order.refundPending());
             events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_PENDING_APPROVAL",
                     "Refund awaiting approval", refundId + " · " + order.id + " · INR "
                     + order.amount.toPlainString() + " · requested by " + requester.displayName,
                     requester.displayName, refundId));
-        } else {
-            String paymentId = "PAY-" + (paymentSequence + 1);
-            refund = new Refund(refundId, order, requester, request.reason.name(), notes,
-                    "SENT_TO_PROVIDER", now, paymentId, null, null, "");
-            payment = provider.send(paymentId, refund, now);
-            paymentSequence++;
-            orders.put(order.id, order.refundSent());
-            payments.add(0, payment);
-            events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_SENT",
-                    "Refund sent to MockPay", refundId + " · " + order.id + " · INR "
-                    + order.amount.toPlainString() + " · automatic processing",
-                    requester.displayName, refundId));
+            RefundResult result = new RefundResult(refund, null, false);
+            refunds.add(0, refund);
+            submissions.put(key, new Submission(username, order.id, request.reason.name(), notes, result));
+            return result;
         }
-        RefundResult result = new RefundResult(refund, payment, false);
-        // Provider calls and every state transition share this monitor, including reset and snapshots.
+
+        String paymentId = "PAY-" + (++paymentSequence);
+        Refund refund = new Refund(refundId, order, requester, request.reason.name(), notes,
+                "PROVIDER_SUBMISSION_PENDING", now, paymentId, null, null, "");
+        RefundResult result = new RefundResult(refund, null, false);
+        orders.put(order.id, order.refundPending());
         refunds.add(0, refund);
         submissions.put(key, new Submission(username, order.id, request.reason.name(), notes, result));
-        return result;
+        prepareProviderOperation(refund, paymentId);
+        return submitToProvider(0, refund, requester, "REFUND_SENT",
+                "Refund sent to MockPay", "automatic processing");
     }
 
     public synchronized RefundResult approve(
@@ -112,30 +109,66 @@ public class RefundService {
                     "Requesters cannot approve their own refund.");
         }
         if ("SENT_TO_PROVIDER".equals(refund.status)) {
-            Payment payment = payments.stream()
-                    .filter(candidate -> refund.id.equals(candidate.refundId))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalStateException("Approved refund is missing its payment."));
-            return new RefundResult(refund, payment, true);
+            return new RefundResult(refund, paymentFor(refund), true);
+        }
+        if (isRecoveryStatus(refund.status)) {
+            throw new ApiException(HttpStatus.CONFLICT, "PROVIDER_RECOVERY_REQUIRED",
+                    "The approval is recorded. Use the provider recovery action; approval will not resubmit it.");
         }
         requirePending(refund);
         String notes = decisionNotes(request);
         Instant now = Instant.now();
-        String paymentId = "PAY-" + (paymentSequence + 1);
-        Refund approved = refund.decide("SENT_TO_PROVIDER", paymentId, approver, now, notes);
-        Payment payment = provider.send(paymentId, approved, now);
-        paymentSequence++;
+        String paymentId = "PAY-" + (++paymentSequence);
+        Refund approved = refund.decide(
+                "PROVIDER_SUBMISSION_PENDING", paymentId, approver, now, notes);
         refunds.set(index, approved);
-        payments.add(0, payment);
-        updateSubmissionResult(approved, payment);
-        Order order = orders.get(refund.orderId);
-        orders.put(order.id, order.refundSent());
-        events.add(0, new Event("EVT-" + (++eventSequence), now, "REFUND_APPROVED",
+        updateSubmissionResult(approved, null);
+        prepareProviderOperation(approved, paymentId);
+        return submitToProvider(index, approved, approver, "REFUND_APPROVED",
                 "Refund approved and sent to MockPay",
-                refund.id + " · " + refund.orderId + " · INR " + refund.amount.toPlainString()
-                        + " · requested by " + refund.requesterName,
-                approver.displayName, refund.id));
-        return new RefundResult(approved, payment, false);
+                "requested by " + refund.requesterName);
+    }
+
+    public synchronized RefundResult reconcileProvider(String username, String refundId) {
+        DemoUsers.User approver = requireApprover(username);
+        int index = refundIndex(refundId);
+        Refund refund = refunds.get(index);
+        if ("SENT_TO_PROVIDER".equals(refund.status)) {
+            return new RefundResult(refund, paymentFor(refund), true);
+        }
+        if (!"PROVIDER_OUTCOME_UNKNOWN".equals(refund.status)) {
+            throw new ApiException(HttpStatus.CONFLICT, "RECONCILIATION_NOT_AVAILABLE",
+                    "Reconciliation is available only when the provider outcome is unknown.");
+        }
+        requireRecoveryApproval(refund);
+        RefundModels.ProviderOperation operation = providerOperation(refund.id);
+        Payment receipt = provider.findReceipt(operation.providerIdempotencyKey)
+                .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "PROVIDER_RECEIPT_NOT_FOUND",
+                        "MockPay has no receipt for this key. The outcome remains unknown; do not retry."));
+        return confirmProviderReceipt(index, refund, receipt, operation, approver, Instant.now(),
+                "REFUND_RECONCILED", "MockPay receipt reconciled without resubmission",
+                "provider receipt registry");
+    }
+
+    public synchronized RefundResult retryProvider(
+            String username, String refundId, ProviderRetryRequest request) {
+        Set<ConstraintViolation<ProviderRetryRequest>> violations = validator.validate(request);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
+        DemoUsers.User approver = requireApprover(username);
+        int index = refundIndex(refundId);
+        Refund refund = refunds.get(index);
+        if ("SENT_TO_PROVIDER".equals(refund.status)) {
+            return new RefundResult(refund, paymentFor(refund), true);
+        }
+        if (!"PROVIDER_RETRY_REQUIRED".equals(refund.status)) {
+            throw new ApiException(HttpStatus.CONFLICT, "PROVIDER_RETRY_NOT_ALLOWED",
+                    "Retry is allowed only after MockPay confirms that nothing was sent.");
+        }
+        requireRecoveryApproval(refund);
+        return submitToProvider(index, refund, approver, "REFUND_RECOVERED",
+                "Refund explicitly retried and sent to MockPay", "approver-confirmed retry");
     }
 
     public synchronized RefundResult reject(
@@ -169,7 +202,7 @@ public class RefundService {
         DemoUsers.User user = DemoUsers.get(username);
         if (!user.roles.contains("APPROVER")) {
             throw new ApiException(HttpStatus.FORBIDDEN, "APPROVER_REQUIRED",
-                    "Only an approver can decide high-value refunds.");
+                    "Only an approver can decide high-value refunds or recover provider submissions.");
         }
         return user;
     }
@@ -201,12 +234,113 @@ public class RefundService {
                 .ifPresent(submission -> submission.result = new RefundResult(refund, payment, false));
     }
 
+    private void prepareProviderOperation(Refund refund, String paymentId) {
+        providerOperations.put(refund.id, new RefundModels.ProviderOperation(
+                refund.id, refund.orderId, paymentId, providerIdempotencyKey(refund.id),
+                "READY", 0, null, "", "", null, null));
+    }
+
+    private RefundResult submitToProvider(
+            int refundIndex, Refund refund, DemoUsers.User actor, String successEventType,
+            String successTitle, String successDetail) {
+        Instant attemptedAt = Instant.now();
+        RefundModels.ProviderOperation operation = providerOperation(refund.id).beginAttempt(attemptedAt);
+        providerOperations.put(refund.id, operation);
+        try {
+            Payment receipt = provider.send(operation.providerIdempotencyKey, operation.paymentId,
+                    refund, attemptedAt);
+            return confirmProviderReceipt(refundIndex, refund, receipt, operation, actor, attemptedAt,
+                    successEventType, successTitle, successDetail);
+        } catch (MockPayProvider.ProviderFailure failure) {
+            boolean confirmedNotSent =
+                    failure.getCertainty() == MockPayProvider.DeliveryCertainty.CONFIRMED_NOT_SENT;
+            String refundStatus = confirmedNotSent
+                    ? "PROVIDER_RETRY_REQUIRED" : "PROVIDER_OUTCOME_UNKNOWN";
+            String operationStatus = confirmedNotSent ? "CONFIRMED_NOT_SENT" : "OUTCOME_UNKNOWN";
+            String code = confirmedNotSent
+                    ? "PROVIDER_CONFIRMED_NOT_SENT" : "PROVIDER_OUTCOME_UNKNOWN";
+            String message = confirmedNotSent
+                    ? "MockPay confirmed that no instruction was accepted. An approver must explicitly retry this recorded refund."
+                    : "MockPay may have accepted the instruction. An approver must reconcile its receipt; it will not be resent automatically.";
+            Refund failed = refund.providerStatus(refundStatus);
+            refunds.set(refundIndex, failed);
+            providerOperations.put(refund.id,
+                    operation.failed(operationStatus, code, failure.getMessage()));
+            updateSubmissionResult(failed, null);
+            events.add(0, new Event("EVT-" + (++eventSequence), attemptedAt,
+                    confirmedNotSent ? "PROVIDER_CONFIRMED_NOT_SENT" : "PROVIDER_OUTCOME_UNKNOWN",
+                    confirmedNotSent
+                            ? "MockPay confirmed no instruction was sent"
+                            : "MockPay outcome requires reconciliation",
+                    refund.id + " · " + refund.orderId + " · stable key "
+                            + operation.providerIdempotencyKey,
+                    actor.displayName, refund.id));
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, code, message);
+        }
+    }
+
+    private RefundResult confirmProviderReceipt(
+            int refundIndex, Refund refund, Payment receipt,
+            RefundModels.ProviderOperation operation, DemoUsers.User actor, Instant resolvedAt,
+            String eventType, String eventTitle, String eventDetail) {
+        Refund sent = refund.providerStatus("SENT_TO_PROVIDER");
+        refunds.set(refundIndex, sent);
+        if (payments.stream().noneMatch(payment -> payment.id.equals(receipt.id))) {
+            payments.add(0, receipt);
+        }
+        providerOperations.put(refund.id, operation.resolved(actor, resolvedAt));
+        Order order = orders.get(refund.orderId);
+        orders.put(order.id, order.refundSent());
+        updateSubmissionResult(sent, receipt);
+        events.add(0, new Event("EVT-" + (++eventSequence), resolvedAt, eventType, eventTitle,
+                refund.id + " · " + refund.orderId + " · INR " + refund.amount.toPlainString()
+                        + " · " + eventDetail,
+                actor.displayName, refund.id));
+        return new RefundResult(sent, receipt, false);
+    }
+
+    private RefundModels.ProviderOperation providerOperation(String refundId) {
+        RefundModels.ProviderOperation operation = providerOperations.get(refundId);
+        if (operation == null) {
+            throw new IllegalStateException("Refund is missing its MockPay operation.");
+        }
+        return operation;
+    }
+
+    private Payment paymentFor(Refund refund) {
+        return payments.stream()
+                .filter(candidate -> refund.id.equals(candidate.refundId))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Sent refund is missing its payment."));
+    }
+
+    private static String providerIdempotencyKey(String refundId) {
+        return "mockpay-refund:" + refundId;
+    }
+
+    private static boolean isRecoveryStatus(String status) {
+        return "PROVIDER_RETRY_REQUIRED".equals(status)
+                || "PROVIDER_OUTCOME_UNKNOWN".equals(status);
+    }
+
+    private static void requireRecoveryApproval(Refund refund) {
+        if (refund.amount.compareTo(APPROVAL_THRESHOLD) > 0
+                && (refund.decidedByUsername == null
+                || refund.decidedByUsername.equals(refund.requesterUsername))) {
+            throw new ApiException(HttpStatus.CONFLICT, "RECOVERY_APPROVAL_REQUIRED",
+                    "A high-value refund needs a recorded independent approval before recovery.");
+        }
+    }
+
     public synchronized Dashboard reset() {
         orders.clear();
         refunds.clear();
         payments.clear();
         events.clear();
         submissions.clear();
+        providerOperations.clear();
+        // Reset holds the service monitor used by every call and snapshot; MockPay state cannot race it.
+        provider.reset();
         refundSequence = 2000;
         paymentSequence = 3000;
         eventSequence = 4000;

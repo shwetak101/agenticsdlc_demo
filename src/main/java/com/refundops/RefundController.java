@@ -64,6 +64,19 @@ public class RefundController {
         return service.reject(authentication.getName(), refundId, request);
     }
 
+    @PostMapping("/refunds/{refundId}/reconcile")
+    public RefundModels.RefundResult reconcile(
+            Authentication authentication, @PathVariable String refundId) {
+        return service.reconcileProvider(authentication.getName(), refundId);
+    }
+
+    @PostMapping("/refunds/{refundId}/retry")
+    public RefundModels.RefundResult retry(
+            Authentication authentication, @PathVariable String refundId,
+            @Valid @RequestBody ProviderRetryRequest request) {
+        return service.retryProvider(authentication.getName(), refundId, request);
+    }
+
     @PostMapping("/demo/reset")
     public RefundModels.Dashboard reset() {
         return service.reset();
